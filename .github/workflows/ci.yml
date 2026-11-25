@@ -11,6 +11,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: cargo test --no-default-features
       - run: cargo build --no-default-features
       - name: Demo API smoke test
@@ -25,10 +26,17 @@ jobs:
           curl -fsS http://127.0.0.1:8080/api/channels | jq -e 'length == 4 and all(.[]; .state == "demo")'
           curl -fsS http://127.0.0.1:8080/api/status | jq -e '.demo and .archive.clips == 4'
           ID=$(curl -fsS 'http://127.0.0.1:8080/api/clips?channel=caltrain' | jq -er '.items[0].id')
-          curl -fsS -D headers -H 'Range: bytes=0-43' "http://127.0.0.1:8080/api/clips/$ID/audio" -o header.wav
+          # The demo WAV is available immediately; wait for the asynchronous MP4.
+          for i in $(seq 1 30); do
+            if curl -fsSI "http://127.0.0.1:8080/api/clips/$ID/audio" | grep -qi '^content-type: audio/mp4'; then break; fi
+            sleep 1
+          done
+          curl -fsS -D headers -H 'Range: bytes=0-43' "http://127.0.0.1:8080/api/clips/$ID/audio" -o header.mp4
           grep -qi '^HTTP/1.1 206' headers
-          test "$(wc -c < header.wav)" -eq 44
-          test "$(head -c 4 header.wav)" = RIFF
+          grep -qi '^content-type: audio/mp4' headers
+          test "$(wc -c < header.mp4)" -eq 44
+          test "$(dd if=header.mp4 bs=1 skip=4 count=4 status=none)" = ftyp
+          test ! -e "data/demo-clips/$ID.wav"
   rust-native:
     runs-on: ubuntu-latest
     steps:

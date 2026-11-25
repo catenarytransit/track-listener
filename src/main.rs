@@ -1,5 +1,6 @@
 mod api;
 mod audio;
+mod compression;
 mod config;
 mod pipeline;
 mod playlists;
@@ -55,10 +56,11 @@ async fn main()->Result<()> {
     let mut p=Pipeline::new(&cfg,args.demo,live);
     #[cfg(feature="native-asr")]
     if live{recognition::start_workers(&mut p,&cfg,store.clone())?;capture::start(&mut p,cfg.clone(),store.clone())?;}
+    let compression=tokio::spawn(compression::run(store.clone()));
     let archive=store.clone();
     let cleanup=tokio::spawn(async move{loop{tokio::time::sleep(Duration::from_secs(30)).await;let archive=archive.clone();let r=tokio::task::spawn_blocking(move||archive.lock().unwrap().prune()).await;if let Ok(Err(e))=r{tracing::error!(%e,"retention cleanup failed");}}});
     let app=api::router(api::AppState{store,channels:p.statuses.clone(),queue:p.queue.clone(),demo:args.demo,capture_enabled:live},cfg.server.web_dist.clone());
     tracing::info!(address=%listener.local_addr()?,live,"Track Listener started");
     let result=axum::serve(listener,app).with_graceful_shutdown(shutdown_signal()).await;
-    cleanup.abort();p.stop().await;result?;Ok(())
+    cleanup.abort();compression.abort();let _=compression.await;p.stop().await;result?;Ok(())
 }

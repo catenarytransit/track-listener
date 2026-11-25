@@ -29,6 +29,9 @@ pub struct Audio {
     pub max_mib: u64,
     pub path: PathBuf,
     pub max_age_hours: u64,
+    /// Zero retains transcript rows indefinitely, independently of audio eviction.
+    #[serde(default)]
+    pub transcript_max_age_hours: u64,
     pub queue_max_clips: usize,
     pub max_clip_seconds: u32,
 }
@@ -63,7 +66,9 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         let a = &self.audio; let r = &self.recognition;
         ensure!(a.max_mib <= (i64::MAX as u64 / 1048576), "audio budget overflow");
-        ensure!(a.max_age_hours <= 876000, "age limit out of range");
+        ensure!(a.max_age_hours <= 876000 && a.transcript_max_age_hours <= 876000, "age limit out of range");
+        ensure!(a.transcript_max_age_hours == 0 || a.max_age_hours == 0 || a.transcript_max_age_hours > a.max_age_hours,
+            "transcript_max_age_hours must exceed max_age_hours when both limits are enabled");
         ensure!((1..=300).contains(&a.max_clip_seconds), "max_clip_seconds must be 1..300");
         ensure!((1..=4096).contains(&a.queue_max_clips), "queue_max_clips must be 1..4096");
         ensure!((1..=128).contains(&r.threads) && (1..=32).contains(&r.workers), "invalid recognition thread/worker count");

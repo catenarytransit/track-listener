@@ -5,12 +5,13 @@ database = "data/track-listener.sqlite3"
 web_dist = "web/dist"
 
 [audio]
-# Global retained WAV payload budget across every channel. RAM mode loses
-# audio on restart; disk mode persists it. Transcripts survive in both modes.
+# Global retained audio payload budget across every channel. Disk WAVs are
+# compressed asynchronously to AAC/MP4; RAM audio remains WAV and is lost on restart.
 mode = "disk" # "ram" or "disk"
 max_mib = 512
 path = "data/clips"
-max_age_hours = 0 # 0 = no age limit; oldest clips evicted first
+max_age_hours = 0 # 0 = no age limit; oldest audio evicted first
+transcript_max_age_hours = 0 # 0 = keep transcripts indefinitely, even after audio expires
 queue_max_clips = 64
 max_clip_seconds = 25
 

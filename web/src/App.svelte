@@ -81,6 +81,7 @@
       <div class="meter" role="progressbar" aria-label="Audio budget usage" aria-valuenow={usage} aria-valuemin="0" aria-valuemax="100"><div style:width={`${usage}%`}></div></div>
       <p>{status?.archive?.mode==='ram'?'RAM only':'Persistent disk'} · oldest first</p>
       <p>{status?.archive?.retained_clips??0} retained clips</p>
+      {#if status?.archive}<p>Transcripts: {status.archive.transcript_max_age_hours ? `${status.archive.transcript_max_age_hours} h age limit` : 'kept indefinitely'}</p>{/if}
       {#if status?.archive?.oldest_ms}<p>Oldest: {dateTime(status.archive.oldest_ms,zone)}</p>{/if}
       <p class="muted">Queue {status?.queue?.depth??0}/{status?.queue?.capacity??0}</p>
     </div>

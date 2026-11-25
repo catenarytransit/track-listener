@@ -38,7 +38,14 @@ pub struct Page { pub items: Vec<Clip>, pub next_cursor: Option<Cursor> }
 #[derive(Debug, Serialize)]
 pub struct Stats {
     pub clips: i64, pub used_bytes: i64, pub retained_clips: i64, pub oldest_ms: Option<i64>,
-    pub max_bytes: u64, pub mode: &'static str, pub max_age_hours: u64, pub sentences: i64,
+    pub max_bytes: u64, pub mode: &'static str, pub max_age_hours: u64, pub transcript_max_age_hours: u64, pub sentences: i64,
+}
+// Only one encoder runs per archive; UUID-based paths stay inside its directory.
+#[derive(Debug)]
+pub struct CompressionJob {
+    pub id: String,
+    pub source: PathBuf,
+    pub temporary: PathBuf,
 }
 #[derive(Debug)]
 struct Archived { id: String, mode: Option<String>, bytes: i64, started: i64 }
@@ -53,6 +60,7 @@ impl Store {
                 id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, channel_name TEXT NOT NULL,
                 started_ms INTEGER NOT NULL, duration_ms INTEGER NOT NULL,
                 audio_bytes INTEGER NOT NULL DEFAULT 0, audio_mode TEXT,
+                audio_format TEXT NOT NULL DEFAULT 'wav',
                 status TEXT NOT NULL, model TEXT, error TEXT
             );
             CREATE TABLE IF NOT EXISTS sentences (
@@ -63,18 +71,32 @@ impl Store {
             CREATE INDEX IF NOT EXISTS clips_time ON clips(started_ms DESC, id DESC);
             CREATE INDEX IF NOT EXISTS clips_channel_time ON clips(channel_id, started_ms DESC, id DESC);
             CREATE INDEX IF NOT EXISTS archive_time ON clips(started_ms, id) WHERE audio_bytes>0;")?;
+        // Existing archives have no format column; their retained payloads are WAV.
+        let has_format = {
+            let mut stmt = db.prepare("PRAGMA table_info(clips)")?;
+            let names = stmt.query_map([], |r| r.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            names.iter().any(|name| name == "audio_format")
+        };
+        if !has_format {
+            db.execute_batch("ALTER TABLE clips ADD COLUMN audio_format TEXT NOT NULL DEFAULT 'wav';")?;
+        }
+        db.execute_batch("CREATE INDEX IF NOT EXISTS disk_wav_time ON clips(started_ms,id)
+            WHERE audio_mode='disk' AND audio_format='wav' AND audio_bytes>0;")?;
         let mut s = Self { db, cfg, ram: HashMap::new() };
         s.reconcile()?;
         Ok(s)
     }
-    fn path(&self, id: &str) -> Result<PathBuf> { Ok(self.cfg.path.join(format!("{}.wav", Uuid::parse_str(id)?))) }
+    fn path(&self, id: &str, extension: &str) -> Result<PathBuf> {
+        Ok(self.cfg.path.join(format!("{}.{extension}", Uuid::parse_str(id)?)))
+    }
     fn archived(&self) -> Result<Vec<Archived>> {
         let mut stmt = self.db.prepare("SELECT id,audio_mode,audio_bytes,started_ms FROM clips WHERE audio_bytes>0 ORDER BY started_ms,id")?;
         let rows = stmt.query_map([], |r| Ok(Archived { id:r.get(0)?, mode:r.get(1)?, bytes:r.get(2)?, started:r.get(3)? }))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
     fn clear_metadata(&self, id: &str) -> Result<()> {
-        self.db.execute("UPDATE clips SET audio_bytes=0,audio_mode=NULL WHERE id=?1", [id])?;
+        self.db.execute("UPDATE clips SET audio_bytes=0,audio_mode=NULL,audio_format='wav' WHERE id=?1", [id])?;
         Ok(())
     }
     fn remove_if_exists(path: &Path) -> Result<()> {
@@ -82,28 +104,40 @@ impl Store {
     }
     fn evict(&mut self, row: &Archived) -> Result<()> {
         if row.mode.as_deref()==Some("ram") { self.ram.remove(&row.id); }
-        else { Self::remove_if_exists(&self.path(&row.id)?)?; }
+        else {
+            Self::remove_if_exists(&self.path(&row.id, "wav")?)?;
+            Self::remove_if_exists(&self.path(&row.id, "mp4")?)?;
+        }
         self.clear_metadata(&row.id)
     }
     fn reconcile(&mut self) -> Result<()> {
         self.db.execute_batch("UPDATE clips SET status='interrupted',error='Process stopped before recognition completed' WHERE status='pending';
-            UPDATE clips SET audio_bytes=0,audio_mode=NULL WHERE audio_mode='ram';")?;
+            UPDATE clips SET audio_bytes=0,audio_mode=NULL,audio_format='wav' WHERE audio_mode='ram';")?;
         let mut known = HashSet::new();
         for row in self.archived()? {
-            let p = self.path(&row.id)?;
-            if self.cfg.mode == Mode::Disk && p.is_file() {
-                let n = p.metadata()?.len();
-                if n >= 44 && n <= i64::MAX as u64 {
-                    self.db.execute("UPDATE clips SET audio_bytes=?1 WHERE id=?2", params![n as i64,row.id])?;
-                    known.insert(p); continue;
+            let mut recovered = false;
+            if self.cfg.mode == Mode::Disk {
+                // An MP4 is published only after FFmpeg succeeds. Prefer it if a
+                // crash occurred between rename, SQLite update and WAV deletion.
+                for (format, minimum) in [("mp4", 1), ("wav", 44)] {
+                    let p = self.path(&row.id, format)?;
+                    if !p.is_file() { continue; }
+                    let n = p.metadata()?.len();
+                    if n >= minimum && n <= i64::MAX as u64 {
+                        self.db.execute("UPDATE clips SET audio_bytes=?1,audio_format=?2 WHERE id=?3",
+                            params![n as i64,format,row.id])?;
+                        known.insert(p);
+                        recovered = true;
+                        break;
+                    }
                 }
             }
-            self.evict(&row)?;
+            if !recovered { self.evict(&row)?; }
         }
         // Only delete files in the dedicated archive directory with our UUID filenames.
         for entry in fs::read_dir(&self.cfg.path)? {
             let p = entry?.path();
-            if p.is_file() && matches!(p.extension().and_then(|e| e.to_str()),Some("wav"|"tmp"))
+            if p.is_file() && matches!(p.extension().and_then(|e| e.to_str()),Some("wav"|"mp4"|"tmp"|"encoding"))
                 && p.file_stem().and_then(|s| s.to_str()).is_some_and(|s| Uuid::parse_str(s).is_ok()) && !known.contains(&p) {
                 Self::remove_if_exists(&p)?;
             }
@@ -121,7 +155,47 @@ impl Store {
             self.evict(&row)?;
             total -= row.bytes;
         }
+        // Transcript retention is independent of the byte budget and audio age.
+        // Never delete pending recognition jobs or clips with playable audio.
+        if self.cfg.transcript_max_age_hours > 0 {
+            let cutoff = now_ms() - self.cfg.transcript_max_age_hours as i64 * 3_600_000;
+            self.db.execute("DELETE FROM clips WHERE audio_bytes=0 AND status<>'pending' AND started_ms<?1", [cutoff])?;
+        }
         Ok(())
+    }
+    pub fn compression_jobs(&self) -> Result<Vec<CompressionJob>> {
+        let mut stmt = self.db.prepare("SELECT id FROM clips
+            WHERE audio_mode='disk' AND audio_format='wav' AND audio_bytes>0
+            ORDER BY started_ms,id")?;
+        let ids = stmt.query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter().map(|id| Ok(CompressionJob {
+            source: self.path(&id, "wav")?,
+            temporary: self.path(&id, "encoding")?,
+            id,
+        })).collect()
+    }
+    // Called under the store lock only after the asynchronous encoder succeeds.
+    // Eviction may have won the race; never recreate evicted audio.
+    pub fn complete_compression(&mut self, job: &CompressionJob) -> Result<bool> {
+        let kept: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM clips
+            WHERE id=?1 AND audio_mode='disk' AND audio_format='wav' AND audio_bytes>0)",
+            [&job.id], |r| r.get(0))?;
+        if !kept || !job.source.is_file() { return Ok(false); }
+        let n = i64::try_from(job.temporary.metadata()?.len())?;
+        ensure!(n > 0, "empty encoded clip");
+        let destination = self.path(&job.id, "mp4")?;
+        // Same-directory rename publishes a complete MP4 atomically.
+        fs::rename(&job.temporary, &destination)?;
+        if let Err(e) = self.db.execute("UPDATE clips SET audio_bytes=?1,audio_format='mp4' WHERE id=?2",
+            params![n,job.id]) {
+            // The original remains available if the metadata write fails.
+            let _ = Self::remove_if_exists(&destination);
+            return Err(e.into());
+        }
+        Self::remove_if_exists(&job.source)?;
+        self.prune()?;
+        Ok(true)
     }
     pub fn add_clip(&mut self, ch: &Channel, started: i64, samples: &[f32]) -> Result<String> {
         let id = Uuid::new_v4().to_string();
@@ -141,7 +215,7 @@ impl Store {
         let data = wav(samples);
         if self.cfg.mode == Mode::Ram { self.ram.insert(id.clone(), Bytes::from(data)); }
         else {
-            let path = self.path(&id)?; let tmp = path.with_extension("tmp");
+            let path = self.path(&id, "wav")?; let tmp = path.with_extension("tmp");
             let write = (|| -> Result<()> { fs::write(&tmp,&data)?; fs::rename(&tmp,&path)?; Ok(()) })();
             if let Err(e) = write {
                 tracing::error!(%e, %id, "could not retain clip");
@@ -160,17 +234,23 @@ impl Store {
         tx.execute("UPDATE clips SET status=?1,model=?2,error=?3 WHERE id=?4",params![if error.is_some(){"error"}else{"ready"},model,error,id])?;
         tx.commit()?; Ok(())
     }
-    pub fn get_audio(&mut self, id: &str) -> Result<Option<Bytes>> {
+    pub fn get_audio(&mut self, id: &str) -> Result<Option<(Bytes, &'static str)>> {
         let Ok(uuid) = Uuid::parse_str(id) else { return Ok(None); };
         if uuid.to_string() != id { return Ok(None); }
         self.prune()?;
-        let mode: Option<Option<String>> = self.db.query_row("SELECT audio_mode FROM clips WHERE id=?1 AND audio_bytes>0",[id],|r|r.get(0)).optional()?;
-        match mode.flatten().as_deref() {
-            Some("ram") => Ok(self.ram.get(id).cloned()),
-            Some("disk") => match fs::read(self.path(id)?) {
-                Ok(data) => Ok(Some(Bytes::from(data))),
-                Err(e) if e.kind()==std::io::ErrorKind::NotFound => { self.clear_metadata(id)?; Ok(None) },
-                Err(e) => Err(e.into()),
+        let row: Option<(Option<String>, String)> = self.db.query_row(
+            "SELECT audio_mode,audio_format FROM clips WHERE id=?1 AND audio_bytes>0",
+            [id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let Some((mode,format)) = row else { return Ok(None); };
+        match mode.as_deref() {
+            Some("ram") => Ok(self.ram.get(id).cloned().map(|data| (data,"audio/wav"))),
+            Some("disk") => {
+                let (extension,mime) = if format=="mp4" { ("mp4","audio/mp4") } else { ("wav","audio/wav") };
+                match fs::read(self.path(id, extension)?) {
+                    Ok(data) => Ok(Some((Bytes::from(data),mime))),
+                    Err(e) if e.kind()==std::io::ErrorKind::NotFound => { self.clear_metadata(id)?; Ok(None) },
+                    Err(e) => Err(e.into()),
+                }
             },
             _ => Ok(None),
         }
@@ -200,13 +280,13 @@ impl Store {
         self.prune()?;
         let (clips, used_bytes, retained_clips, oldest_ms) = self.db.query_row("SELECT count(*),coalesce(sum(audio_bytes),0),count(CASE WHEN audio_bytes>0 THEN 1 END),min(CASE WHEN audio_bytes>0 THEN started_ms END) FROM clips", [], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
         let sentences=self.db.query_row("SELECT count(*) FROM sentences",[],|r|r.get(0)).context("count sentences")?;
-        Ok(Stats{clips,used_bytes,retained_clips,oldest_ms,max_bytes:self.cfg.max_bytes(),mode:self.cfg.mode.as_str(),max_age_hours:self.cfg.max_age_hours,sentences})
+        Ok(Stats{clips,used_bytes,retained_clips,oldest_ms,max_bytes:self.cfg.max_bytes(),mode:self.cfg.mode.as_str(),max_age_hours:self.cfg.max_age_hours,transcript_max_age_hours:self.cfg.transcript_max_age_hours,sentences})
     }
 }
 #[cfg(test)] mod tests {
     use super::*;
     use crate::audio::RATE;
-    fn config(path:&Path,mode:Mode)->Audio { Audio{mode,max_mib:1,path:path.join("clips"),max_age_hours:0,queue_max_clips:4,max_clip_seconds:25} }
+    fn config(path:&Path,mode:Mode)->Audio { Audio{mode,max_mib:1,path:path.join("clips"),max_age_hours:0,transcript_max_age_hours:0,queue_max_clips:4,max_clip_seconds:25} }
     fn channel()->Channel { Channel{id:"test".into(),name:"Test".into(),url:"http://example.org".into(),enabled:true} }
     #[test] fn retention_preserves_text_and_evicts_oldest() {
         for mode in [Mode::Ram,Mode::Disk] {
@@ -229,6 +309,86 @@ impl Store {
         let d=tempfile::tempdir().unwrap();let mut cfg=config(d.path(),Mode::Ram);cfg.max_age_hours=1;
         let mut s=Store::open(&d.path().join("db"),cfg).unwrap(); let old=s.add_clip(&channel(),now_ms()-7_200_000,&[0.0;512]).unwrap();assert!(s.get_audio(&old).unwrap().is_none());
         let samples=vec![0.0;RATE*20]; let new=s.add_clip(&channel(),now_ms(),&samples).unwrap();let late=s.add_clip(&channel(),now_ms()-10000,&samples).unwrap();assert!(s.get_audio(&late).unwrap().is_none());assert!(s.get_audio(&new).unwrap().is_some());
+    }
+    #[tokio::test]
+    async fn compresses_existing_archive_and_recovers_after_restart() {
+        let d=tempfile::tempdir().unwrap();
+        let db=d.path().join("db");
+        let cfg=config(d.path(),Mode::Disk);
+        let id={
+            let mut s=Store::open(&db,cfg.clone()).unwrap();
+            let samples=vec![0.0; RATE*2];
+            let id=s.add_clip(&channel(),now_ms(),&samples).unwrap();
+            s.finish(&id,&[Sentence{text:"Radio test".into(),start_ms:Some(0),end_ms:Some(1000)}],"test",None).unwrap();
+            id
+        };
+        let shared=std::sync::Arc::new(std::sync::Mutex::new(Store::open(&db,cfg.clone()).unwrap()));
+        let original=shared.lock().unwrap().get_audio(&id).unwrap().unwrap();
+        assert_eq!(original.1,"audio/wav");
+        crate::compression::compress_pass(&shared).await.unwrap();
+        {
+            let mut s=shared.lock().unwrap();
+            let (encoded,mime)=s.get_audio(&id).unwrap().unwrap();
+            assert_eq!(mime,"audio/mp4");
+            assert_eq!(&encoded[4..8],b"ftyp");
+            assert!(encoded.len()<original.0.len());
+            assert_eq!(s.stats().unwrap().used_bytes,encoded.len() as i64);
+            assert!(s.compression_jobs().unwrap().is_empty());
+            assert!(!s.path(&id,"wav").unwrap().exists());
+            // Simulate a crash after publication, before the WAV was deleted
+            // and before the format/byte count was committed to SQLite.
+            fs::write(s.path(&id,"wav").unwrap(),&original.0).unwrap();
+            fs::write(s.path(&id,"encoding").unwrap(),b"partial").unwrap();
+            s.db.execute("UPDATE clips SET audio_format='wav',audio_bytes=?1 WHERE id=?2",
+                params![original.0.len() as i64,id]).unwrap();
+        }
+        drop(shared);
+        let mut s=Store::open(&db,cfg).unwrap();
+        assert_eq!(s.get_audio(&id).unwrap().unwrap().1,"audio/mp4");
+        assert!(!s.path(&id,"wav").unwrap().exists());
+        assert!(!s.path(&id,"encoding").unwrap().exists());
+        assert_eq!(s.list(&Filters{q:Some("Radio test".into()),..Default::default()}).unwrap().items.len(),1);
+        s.cfg.max_mib=0;
+        s.prune().unwrap();
+        assert!(s.get_audio(&id).unwrap().is_none());
+        assert!(!s.path(&id,"mp4").unwrap().exists());
+        assert_eq!(s.stats().unwrap().sentences,1);
+    }
+    #[test]
+    fn encoding_cannot_resurrect_evicted_audio() {
+        let d=tempfile::tempdir().unwrap();
+        let mut s=Store::open(&d.path().join("db"),config(d.path(),Mode::Disk)).unwrap();
+        let id=s.add_clip(&channel(),now_ms(),&[0.0;512]).unwrap();
+        let job=s.compression_jobs().unwrap().pop().unwrap();
+        fs::write(&job.temporary,b"encoded").unwrap();
+        s.cfg.max_mib=0;
+        s.prune().unwrap();
+        assert!(!s.complete_compression(&job).unwrap());
+        assert!(s.get_audio(&id).unwrap().is_none());
+        assert!(!s.path(&id,"mp4").unwrap().exists());
+    }
+    #[test]
+    fn transcripts_outlive_audio_and_expire_independently() {
+        let d=tempfile::tempdir().unwrap();
+        let mut cfg=config(d.path(),Mode::Disk);
+        cfg.max_age_hours=1;
+        cfg.transcript_max_age_hours=24;
+        let mut s=Store::open(&d.path().join("db"),cfg).unwrap();
+        let now=now_ms();
+        let recent=s.add_clip(&channel(),now-2*3_600_000,&[0.0;512]).unwrap();
+        let old=s.add_clip(&channel(),now-25*3_600_000,&[0.0;512]).unwrap();
+        let sentence=Sentence{text:"Copy".into(),start_ms:None,end_ms:None};
+        assert!(s.get_audio(&recent).unwrap().is_none());
+        // Old pending jobs must survive cleanup until their workers finish.
+        assert_eq!(s.stats().unwrap().clips,2);
+        s.finish(&recent,std::slice::from_ref(&sentence),"test",None).unwrap();
+        s.finish(&old,std::slice::from_ref(&sentence),"test",None).unwrap();
+        s.prune().unwrap();
+        let page=s.list(&Filters{q:Some("Copy".into()),..Default::default()}).unwrap();
+        assert_eq!(page.items.len(),1);
+        assert_eq!(page.items[0].id,recent);
+        assert!(!page.items[0].audio_available);
+        assert_eq!(s.stats().unwrap().sentences,1);
     }
     #[test] fn cursor_orders_equal_timestamps() {
         let d=tempfile::tempdir().unwrap();let mut s=Store::open(&d.path().join("db"),config(d.path(),Mode::Ram)).unwrap();
