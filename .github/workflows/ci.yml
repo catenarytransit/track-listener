@@ -23,7 +23,7 @@ jobs:
             curl -fsS http://127.0.0.1:8080/health && break
             sleep 1
           done
-          curl -fsS http://127.0.0.1:8080/api/channels | jq -e 'length == 4 and all(.[]; .state == "demo")'
+          curl -fsS http://127.0.0.1:8080/api/channels | jq -e 'length == 4 and all(.[]; .state == "demo" and .region == "California")'
           curl -fsS http://127.0.0.1:8080/api/status | jq -e '.demo and .archive.clips == 4'
           ID=$(curl -fsS 'http://127.0.0.1:8080/api/clips?channel=caltrain' | jq -er '.items[0].id')
           # The demo WAV is available immediately; wait for the asynchronous MP4.

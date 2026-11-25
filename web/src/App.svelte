@@ -1,6 +1,7 @@
 <script>
   import { onMount, tick } from 'svelte';
   import { createThemeController } from './theme.js';
+  import { groupChannels } from './channels.js';
   let theme = 'system', themeController;
   function setTheme(value) {
     themeController?.set(value);
@@ -11,8 +12,8 @@
   let selected = null, audioEl, audioError = '', playRequest = 0, seekEnd = null;
   const timezones = {local:undefined, pacific:'America/Los_Angeles', utc:'UTC'};
   const formatter = (opts,z) => new Intl.DateTimeFormat(undefined, {...opts, timeZone:timezones[z]});
-  function dateTime(ms,z) { return ms == null ? '—' : formatter({month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false,timeZoneName:'short'},z).format(ms); }
-  function clock(ms,z) { return formatter({hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false},z).format(ms); }
+  function dateTime(ms,z) { return ms == null ? '—' : formatter({month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23',timeZoneName:'short'},z).format(ms); }
+  function clock(ms,z) { return formatter({hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'},z).format(ms); }
   function duration(ms) { const s=Math.max(0,Math.round(ms/1000)); return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`; }
   function bytes(n) { return n >= 1073741824 ? `${(n/1073741824).toFixed(2)} GiB` : `${(n/1048576).toFixed(1)} MiB`; }
   function label(state) { return ({receiving:'Receiving',connecting:'Connecting',reconnecting:'Reconnecting',disabled:'Disabled',demo:'Demo',stopped:'Stopped',starting:'Starting'})[state] || state; }
@@ -65,6 +66,7 @@
   function timeUpdate(){if(seekEnd!==null&&audioEl&&audioEl.currentTime>=seekEnd){audioEl.pause();seekEnd=null;}}
   function closePlayer(){++playRequest; audioEl?.pause();selected=null;seekEnd=null;audioError='';}
   $: online=channels.filter(c=>c.state==='receiving').length;
+  $: regions=groupChannels(channels);
   $: used=status?.archive?.used_bytes??0;
   $: budget=status?.archive?.max_bytes??0;
   $: usage=budget?Math.min(100,100*used/budget):0;
@@ -73,16 +75,25 @@
 <svelte:head><title>Track Listener · Radio archive</title></svelte:head>
 <div class="shell">
   <aside>
-    <div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 36 36" fill="none"><path d="M12 7v22M24 7v22M8 11h20M8 18h20M8 25h20" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M3 5a18 18 0 0 1 30 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span><div><strong>Track Listener</strong><small>RAIL RADIO ARCHIVE</small></div></div>
-    <div class="sidebar-label">CHANNELS <span>{online}/{channels.length} receiving</span></div>
+    <div class="sidebar-label"><h2>Channels</h2><span class="receiving-count">{online}/{channels.length} receiving</span></div>
     <nav aria-label="Radio channels">
-      <button class:active={!channel} on:click={()=>choose('')}><span class="all-icon">◉</span><span>All channels</span></button>
-      {#each channels as c (c.id)}
-        <button class:active={channel===c.id} on:click={()=>choose(c.id)} title={c.detail||label(c.state)}><span class:receiving={c.state==='receiving'} class="dot"></span><span class="channel-name">{c.name}<small>{label(c.state)}{c.dropped_clips ? ` · ${c.dropped_clips} dropped` : ''}</small></span></button>
+      <button class:active={!channel} aria-pressed={!channel} on:click={()=>choose('')}>All channels</button>
+      {#each regions as region (region.name)}
+        <section class="channel-group" aria-label={region.name}>
+          <h3>{region.name}</h3>
+          <div class="channel-list">
+            {#each region.channels as c (c.id)}
+              <button class:active={channel===c.id} aria-pressed={channel===c.id} on:click={()=>choose(c.id)} title={c.detail||label(c.state)}>
+                <span class:receiving={c.state==='receiving'} class="dot" aria-hidden="true"></span>
+                <span class="channel-name">{c.name}<small>{label(c.state)}{c.dropped_clips ? ` · ${c.dropped_clips} dropped` : ''}</small></span>
+              </button>
+            {/each}
+          </div>
+        </section>
       {/each}
     </nav>
     <div class="storage">
-      <div class="sidebar-label">AUDIO RETENTION</div>
+      <h2>Audio retention</h2>
       <div class="storage-value">{bytes(used)} <small>/ {bytes(budget)}</small></div>
       <div class="meter" role="progressbar" aria-label="Audio budget usage" aria-valuenow={usage} aria-valuemin="0" aria-valuemax="100"><div style:width={`${usage}%`}></div></div>
       <p>{status?.archive?.mode==='ram'?'RAM only':'Persistent disk'} · oldest first</p>
@@ -91,12 +102,11 @@
       {#if status?.archive?.oldest_ms}<p>Oldest: {dateTime(status.archive.oldest_ms,zone)}</p>{/if}
       <p class="muted">Queue {status?.queue?.depth??0}/{status?.queue?.capacity??0}</p>
     </div>
-    <footer>Self-hosted · CPU recognition<br/>Transcripts may contain errors.</footer>
   </aside>
   <main>
-    <header class="page-header"><div><div class="eyebrow">MONITOR / TRANSCRIPTS</div><h1>{channel ? channels.find(c=>c.id===channel)?.name||channel : 'Radio transmissions'}</h1><p>Browse speech detected on railway radio channels.</p></div><div class="live-controls"><label class="theme-control">Appearance<select aria-label="Appearance" value={theme} on:change={e=>setTheme(e.currentTarget.value)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label><button class:live-on={live&&!loadedOlder} class="live-button" on:click={()=>{if(live&&!loadedOlder)live=false;else resume();}}><span class="dot"></span>{live&&!loadedOlder?'Live updates':'Resume live'}</button><button on:click={()=>load()} class="secondary">Refresh</button></div></header>
+    <header class="page-header"><h1>{channel ? channels.find(c=>c.id===channel)?.name||channel : 'Radio transmissions'}</h1><div class="live-controls"><label class="theme-control">Appearance<select aria-label="Appearance" value={theme} on:change={e=>setTheme(e.currentTarget.value)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label><button class:live-on={live&&!loadedOlder} class="live-button" on:click={()=>{if(live&&!loadedOlder)live=false;else resume();}}><span class="dot"></span>{live&&!loadedOlder?'Live updates':'Resume live'}</button><button on:click={()=>load()} class="secondary">Refresh</button></div></header>
     {#if status?.demo}<div class="notice">Demo mode · synthetic recordings only. No live radio is connected.</div>{/if}
-    <div class="stats"><div><span>Stored transmissions</span><strong>{status?.archive?.clips??'—'}</strong></div><div><span>Recognized sentences</span><strong>{status?.archive?.sentences??'—'}</strong></div><div><span>Receiving channels</span><strong>{online}<small> / {channels.length}</small></strong></div></div>
+    <div class="stats"><span>Stored transmissions: <span class="stat-value">{status?.archive?.clips??'—'}</span></span><span>Recognized sentences: <span class="stat-value">{status?.archive?.sentences??'—'}</span></span></div>
     <section class="filters" aria-label="Filter transcripts">
       <label class="search">Search transcript<input type="search" placeholder="Search words or train numbers…" bind:value={query} on:input={changed}/></label>
       <label>From (local)<input type="datetime-local" bind:value={since} on:change={changed}/></label>
@@ -110,7 +120,7 @@
     <section class="transmissions" aria-label="Transmissions">
       {#each clips as clip (clip.id)}
         <article class:selected-card={selected?.id===clip.id}>
-          <div class="clip-heading"><div class="clip-time"><strong>{dateTime(clip.started_ms,zone)}</strong><span>{duration(clip.duration_ms)} · {clip.channel_name}</span></div><div class="clip-actions"><span class="chip">{clip.status}</span>{#if clip.audio_available}<button class="play" on:click={()=>play(clip)}>▶ Play clip</button>{:else}<span class="expired">Audio unavailable</span>{/if}</div></div>
+          <div class="clip-heading"><div class="clip-time"><strong>{dateTime(clip.started_ms,zone)}</strong><span>{duration(clip.duration_ms)} · {clip.channel_name}</span></div><div class="clip-actions"><span class="clip-status">{clip.status}</span>{#if clip.audio_available}<button class="play" on:click={()=>play(clip)}>▶ Play clip</button>{:else}<span class="expired">Audio unavailable</span>{/if}</div></div>
           {#if clip.sentences.length}
             {#each clip.sentences as sentence (sentence.ordinal)}
               <div class="sentence"><span class="sentence-time" title={sentence.start_ms==null?'Sentence timing unavailable; clip time shown':'Estimated sentence start'}>{sentence.start_ms==null?'~ ':''}{clock(clip.started_ms+(sentence.start_ms??0),zone)}</span><p>{sentence.text}</p>{#if clip.audio_available&&sentence.start_ms!=null}<button class="sentence-play" aria-label={'Play sentence '+(sentence.ordinal+1)} on:click={()=>play(clip,sentence)}>▶</button>{/if}</div>
@@ -121,9 +131,8 @@
       {/each}
     </section>
     {#if cursor}<button class="older secondary" disabled={loading} on:click={()=>load(true)}>{loading?'Loading…':'Load older transmissions'}</button>{/if}
-    <div class="end-note">Times refer to received audio, not guaranteed over-the-air transmission times.</div>
   </main>
 </div>
 {#if selected}
-  <section class="player" aria-label="Audio playback"><div class="player-label"><div class="eyebrow">NOW PLAYING</div><strong>{selected.channel_name}</strong><small>{dateTime(selected.started_ms,zone)}</small></div><div class="audio-wrap"><audio bind:this={audioEl} src={'/api/clips/'+selected.id+'/audio'} controls preload="metadata" on:timeupdate={timeUpdate} on:error={()=>audioError='Audio could not be loaded. It may have expired.'} aria-label="Recorded radio clip"></audio>{#if audioError}<small role="status">{audioError}</small>{/if}</div><button class="close" on:click={closePlayer} aria-label="Close audio player">×</button></section>
+  <section class="player" aria-label="Audio playback"><div class="player-label"><strong>{selected.channel_name}</strong><small>{dateTime(selected.started_ms,zone)}</small></div><div class="audio-wrap"><audio bind:this={audioEl} src={'/api/clips/'+selected.id+'/audio'} controls preload="metadata" on:timeupdate={timeUpdate} on:error={()=>audioError='Audio could not be loaded. It may have expired.'} aria-label="Recorded radio clip"></audio>{#if audioError}<small role="status">{audioError}</small>{/if}</div><button class="close" on:click={closePlayer} aria-label="Close audio player">×</button></section>
 {/if}

@@ -18,7 +18,7 @@ export function createThemeController(win, doc, onChange = () => {}) {
     const theme = resolveTheme(preference, media.matches);
     doc.documentElement.dataset.theme = theme;
     const meta = doc.querySelector('meta[name="theme-color"]');
-    if (meta) meta.content = theme === 'dark' ? '#0c1719' : '#102528';
+    if (meta) meta.content = theme === 'dark' ? '#202124' : '#f4f4f4';
     onChange(preference);
   }
 
