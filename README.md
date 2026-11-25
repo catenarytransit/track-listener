@@ -8,7 +8,7 @@ A self-hosted CPU-only radio transcription and recording archive. All backend ap
 - One Silero VAD per channel, with independent state. FFmpeg supplies mono 16 kHz signed 16-bit PCM. VAD emits speech clips (bounded by `max_clip_seconds`).
 - Shared bounded crossbeam queue feeds dedicated Rust OS threads running the English Parakeet TDT 0.6B v2 INT8 model on CPU via `sherpa-onnx` 2.0.3. Model copies are per worker; ONNX threads are configured per copy. A full queue records an error and retains the audio when budget permits instead of silently dropping the archive entry.
 - SQLite (`rusqlite`, bundled SQLite, WAL mode) stores one row per clip and one row per recognized sentence. New archive audio starts as WAV. In disk mode a separate asynchronous FFmpeg worker encodes completed files to mono 32 kbit/s AAC in an audio-only MP4 container; RAM mode keeps WAV. A common store mutex serializes archive updates and SQLite writes; blocking storage work is moved off the async HTTP and capture tasks.
-- Axum serves the REST API, frontend and byte-range-capable WAV and MP4 playback. Svelte supports channel/time/text filtering, live polling, pagination, per-sentence playback, full clip playback, and storage/queue status.
+- Axum serves the REST API, frontend and byte-range-capable WAV and MP4 playback. Svelte supports channel/time/text filtering, live polling, pagination, per-sentence playback, full clip playback, and storage/queue status. The Appearance selector supports System (default), Light, and Dark themes; the selected preference is stored locally in the browser and System follows OS appearance changes.
 
 ## Quick start (Linux)
 

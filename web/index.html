@@ -1,2 +1,15 @@
 <!doctype html>
-<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><meta name="theme-color" content="#102528"/><title>Track Listener</title></head><body><div id="app"></div><script type="module" src="/src/main.js"></script></body></html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><meta name="theme-color" content="#102528"/><title>Track Listener</title>
+<script>
+  // Apply the saved preference before first paint, even before Vite mounts Svelte.
+  (function () {
+    var preference = 'system';
+    try {
+      var saved = localStorage.getItem('track-listener.theme');
+      if (saved === 'light' || saved === 'dark') preference = saved;
+    } catch (_) {}
+    var dark = preference === 'dark' || (preference === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    document.querySelector('meta[name="theme-color"]').content = dark ? '#0c1719' : '#102528';
+  })();
+</script></head><body><div id="app"></div><script type="module" src="/src/main.js"></script></body></html>
