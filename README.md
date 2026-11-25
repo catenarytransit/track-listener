@@ -22,7 +22,7 @@ sudo apt-get install -y build-essential pkg-config cmake curl bzip2 ffmpeg libss
 cargo run --release -- --config config.toml
 ```
 
-Open http://127.0.0.1:8080. The first Cargo build obtains native Sherpa-ONNX libraries and dependencies; the separate shell script downloads the ASR and VAD models. After installation, inference does not require Internet access, although network radio feeds do. No GPU or CUDA needed. For custom native library locations, consult https://docs.rs/sherpa-onnx/2.0.3/sherpa_onnx/ (e.g. `SHERPA_ONNX_LIB_DIR`). The default static linking feature is used. The upstream model bundle is about 630 MiB on disk; inference uses additional RAM.
+Open http://127.0.0.1:4582. The first Cargo build obtains native Sherpa-ONNX libraries and dependencies; the separate shell script downloads the ASR and VAD models. After installation, inference does not require Internet access, although network radio feeds do. No GPU or CUDA needed. For custom native library locations, consult https://docs.rs/sherpa-onnx/2.0.3/sherpa_onnx/ (e.g. `SHERPA_ONNX_LIB_DIR`). The default static linking feature is used. The upstream model bundle is about 630 MiB on disk; inference uses additional RAM.
 
 ## Docker
 
@@ -73,12 +73,13 @@ hotwords_score = 0.75 # set to 0 or use hotwords = [] to restore greedy decoding
 
 The archive budget applies to total retained audio bytes across all channels (actual MP4 file sizes after conversion). Oldest audio clips are evicted first; late-arriving clips cannot evict newer ones to make space for themselves. A zero-byte budget retains transcripts only. Age expiration is also applied periodically and at archive access. SQLite transcripts survive audio eviction and are retained indefinitely by default. Optionally set `transcript_max_age_hours` to an age in hours; if both age limits are enabled, the transcript limit must exceed the audio limit. Expired transcript rows are deleted only after audio is gone and recognition is no longer pending. For example, set `max_age_hours = 168` and `transcript_max_age_hours = 2160` for seven-day audio and 90-day transcript age limits; the audio byte budget may evict clips sooner. At 32 kbit/s, AAC payloads use roughly one eighth of the space of 16 kHz mono PCM WAV before container overhead. Actual savings and coverage depend on clip lengths and encoder output. The worker encodes one file at a time outside the store lock, publishes the MP4 by atomic rename, updates the retained byte count, and removes the WAV only after successful publication. Failed encodes leave the WAV available for playback and retry. An in-progress MP4 temporary file uses additional disk space outside the retained payload budget. RAM mode does not survive restarts. This is a payload budget, not a hard limit on process RSS: inference models, queued float samples, temporary encoding buffers, in-flight HTTP responses, and SQLite caches need additional memory. Disk mode does not cap the SQLite database itself. The queue has a separate bounded clip count.
 
-Four feeds are preconfigured: Orange County, Metrolink San Fernando Valley, Santa Barbara and Caltrain. Add more with:
+Four feeds are preconfigured under California: Orange County, Metrolink San Fernando Valley, Santa Barbara and Caltrain. The optional `region` field groups channels in the web navigation. Existing configurations keep the California grouping for those four IDs; other channels without a region appear under Unassigned. Add more with:
 
 ```toml
 [[channels]]
 id = "extra"
 name = "Extra dispatch channel"
+region = "California"
 url = "https://example.org/radio.pls"
 enabled = true
 ```
@@ -90,7 +91,7 @@ Direct HTTP(S) audio URLs are accepted as well as `.pls` URLs. Disable a channel
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | Process liveness (not upstream feed health) |
-| GET | `/api/channels` | Per-channel connection state, errors, dropped jobs and last audio time |
+| GET | `/api/channels` | Per-channel region, connection state, errors, dropped jobs and last audio time |
 | GET | `/api/status` | Retention stats and queue status |
 | GET | `/api/clips` | Paginated transcript/clip list |
 | GET, HEAD | `/api/clips/{id}/audio` | WAV or AAC/MP4 audio with HTTP Range seeking and format-specific Content-Type; 404 after audio eviction |

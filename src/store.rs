@@ -319,7 +319,7 @@ impl Store {
     use super::*;
     use crate::audio::RATE;
     fn config(path:&Path,mode:Mode)->Audio { Audio{mode,max_mib:1,path:path.join("clips"),max_age_hours:0,transcript_max_age_hours:0,queue_max_clips:4,max_clip_seconds:25} }
-    fn channel()->Channel { Channel{id:"test".into(),name:"Test".into(),url:"http://example.org".into(),enabled:true} }
+    fn channel()->Channel { Channel{id:"test".into(),name:"Test".into(),url:"http://example.org".into(),region:None,enabled:true} }
     #[test] fn retention_preserves_text_and_evicts_oldest() {
         for mode in [Mode::Ram,Mode::Disk] {
             let d=tempfile::tempdir().unwrap(); let mut s=Store::open(&d.path().join("db"),config(d.path(),mode)).unwrap();

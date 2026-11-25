@@ -18,6 +18,6 @@ WORKDIR /app
 COPY --from=backend /build/target/release/track-listener /usr/local/bin/track-listener
 COPY --from=frontend /build/dist ./web/dist
 COPY config.docker.toml ./config.toml
-EXPOSE 8080
+EXPOSE 4582
 ENTRYPOINT ["track-listener"]
 CMD ["--config", "config.toml"]

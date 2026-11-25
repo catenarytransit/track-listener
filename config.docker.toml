@@ -1,6 +1,6 @@
 [server]
 host = "0.0.0.0"
-port = 8080
+port = 4582
 database = "data/track-listener.sqlite3"
 web_dist = "web/dist"
 
@@ -29,19 +29,23 @@ hotwords_score = 0.75 # set to 0 or use hotwords = [] to restore greedy decoding
 [[channels]]
 id = "orange"
 name = "Orange County"
+region = "California"
 url = "http://www.railroadradio.net/content/playlist/orange.pls"
 
 [[channels]]
 id = "metrolink-sfv"
 name = "Metrolink San Fernando Valley"
+region = "California"
 url = "http://www.railroadradio.net/content/playlist/metrolinkSFV.pls"
 
 [[channels]]
 id = "santa-barbara"
 name = "Santa Barbara"
+region = "California"
 url = "http://www.railroadradio.net/content/playlist/SBarbara.pls"
 
 [[channels]]
 id = "caltrain"
 name = "Caltrain"
+region = "California"
 url = "http://www.railroadradio.net/content/playlist/caltrain.pls"

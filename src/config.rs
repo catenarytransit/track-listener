@@ -57,8 +57,23 @@ pub struct Channel {
     pub id: String,
     pub name: String,
     pub url: String,
+    /// Region shown in the channel navigation. Optional for existing configurations.
+    #[serde(default)]
+    pub region: Option<String>,
     #[serde(default = "enabled")]
     pub enabled: bool,
+}
+impl Channel {
+    pub fn region_label(&self) -> &str {
+        if let Some(region) = self.region.as_deref().map(str::trim).filter(|region| !region.is_empty()) {
+            return region;
+        }
+        // Preserve the region of the four original feeds in existing config files.
+        match self.id.as_str() {
+            "orange" | "metrolink-sfv" | "santa-barbara" | "caltrain" => "California",
+            _ => "Unassigned",
+        }
+    }
 }
 fn enabled() -> bool { true }
 fn default_hotwords() -> Vec<String> { ["highball", "C.P."].into_iter().map(String::from).collect() }
@@ -91,5 +106,25 @@ impl Config {
             ensure!(matches!(u.scheme(), "http" | "https"), "only HTTP(S) feeds supported");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn channel(id: &str, extra: &str) -> Channel {
+        toml::from_str(&format!("id = \"{id}\"\nname = \"Radio\"\nurl = \"https://example.org/radio.pls\"\n{extra}")).unwrap()
+    }
+
+    #[test]
+    fn channel_region_is_backwards_compatible_and_configurable() {
+        for id in ["orange", "metrolink-sfv", "santa-barbara", "caltrain"] {
+            assert_eq!(channel(id, "").region_label(), "California");
+        }
+        assert_eq!(channel("extra", "").region_label(), "Unassigned");
+        assert_eq!(channel("extra", "region = \"  Zürich  \"").region_label(), "Zürich");
+        assert_eq!(channel("caltrain", "region = \"Northern California\"").region_label(), "Northern California");
+        assert_eq!(channel("extra", "region = \"  \"").region_label(), "Unassigned");
     }
 }

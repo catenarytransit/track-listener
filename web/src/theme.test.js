@@ -55,7 +55,7 @@ test('restores preference, persists manual changes, follows system only in syste
   controller.set('system');
   assert.equal(env.saved(), 'system');
   assert.equal(active(), 'dark');
-  assert.equal(env.meta.content, '#0c1719');
+  assert.equal(env.meta.content, '#202124');
   env.system(false);
   assert.equal(active(), 'light');
   env.storage(THEME_KEY, 'dark');

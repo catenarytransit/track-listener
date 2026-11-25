@@ -7,12 +7,12 @@ pub type SharedStore = Arc<Mutex<Store>>;
 pub type Statuses = Arc<Mutex<Vec<ChannelStatus>>>;
 #[derive(Clone, Debug, Serialize)]
 pub struct ChannelStatus {
-    pub id: String, pub name: String, pub state: String, pub detail: Option<String>,
+    pub id: String, pub name: String, pub region: String, pub state: String, pub detail: Option<String>,
     pub dropped_clips: u64, pub errors: u64, pub last_audio_ms: Option<i64>,
 }
 impl ChannelStatus {
     pub fn new(ch: &Channel, demo: bool, capture: bool) -> Self {
-        Self { id:ch.id.clone(), name:ch.name.clone(), state:if demo {"demo"} else if capture && ch.enabled {"starting"} else {"disabled"}.into(), detail:None,dropped_clips:0,errors:0,last_audio_ms:None }
+        Self { id:ch.id.clone(), name:ch.name.clone(), region:ch.region_label().to_owned(), state:if demo {"demo"} else if capture && ch.enabled {"starting"} else {"disabled"}.into(), detail:None,dropped_clips:0,errors:0,last_audio_ms:None }
     }
 }
 #[derive(Debug)]
