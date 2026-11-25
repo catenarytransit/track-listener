@@ -46,6 +46,10 @@ pub struct Recognition {
     pub vad_threshold: f32,
     pub min_speech_seconds: f32,
     pub min_silence_seconds: f32,
+    #[serde(default = "default_hotwords")]
+    pub hotwords: Vec<String>,
+    #[serde(default = "default_hotwords_score")]
+    pub hotwords_score: f32,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -57,6 +61,8 @@ pub struct Channel {
     pub enabled: bool,
 }
 fn enabled() -> bool { true }
+fn default_hotwords() -> Vec<String> { ["highball", "C.P."].into_iter().map(String::from).collect() }
+fn default_hotwords_score() -> f32 { 0.75 }
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let config: Self = toml::from_str(&std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?)?;
@@ -74,6 +80,10 @@ impl Config {
         ensure!((1..=128).contains(&r.threads) && (1..=32).contains(&r.workers), "invalid recognition thread/worker count");
         ensure!(r.vad_threshold > 0.0 && r.vad_threshold < 1.0, "invalid VAD threshold");
         ensure!(r.min_speech_seconds > 0.0 && r.min_speech_seconds < a.max_clip_seconds as f32 && r.min_silence_seconds > 0.0 && r.min_silence_seconds <= 10.0, "invalid VAD durations");
+        ensure!(r.hotwords_score.is_finite() && (0.0..=5.0).contains(&r.hotwords_score), "hotwords_score must be between 0 and 5");
+        ensure!(r.hotwords.len() <= 100 && r.hotwords.iter().all(|w| !w.trim().is_empty()
+            && w.len() <= 100 && !w.chars().any(|c| c.is_control() || matches!(c,'/'|':'|'\u{2581}'))),
+            "invalid hotwords (at most 100 phrases, each 1..100 bytes; no control characters, slash, colon or tokenizer marker)");
         let mut ids = HashSet::new();
         for c in &self.channels {
             ensure!(!c.id.is_empty() && c.id.len() <= 100 && !c.name.trim().is_empty() && ids.insert(&c.id), "empty or duplicate channel id/name: {}", c.id);

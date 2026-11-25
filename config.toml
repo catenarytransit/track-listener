@@ -23,6 +23,8 @@ workers = 1
 vad_threshold = 0.35
 min_speech_seconds = 0.20
 min_silence_seconds = 0.65
+hotwords = ["highball", "C.P."]
+hotwords_score = 0.75 # set to 0 or use hotwords = [] to restore greedy decoding
 
 [[channels]]
 id = "orange"

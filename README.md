@@ -67,6 +67,8 @@ workers = 1
 vad_threshold = 0.35
 min_speech_seconds = 0.20
 min_silence_seconds = 0.65
+hotwords = ["highball", "C.P."]
+hotwords_score = 0.75 # set to 0 or use hotwords = [] to restore greedy decoding
 ```
 
 The archive budget applies to total retained audio bytes across all channels (actual MP4 file sizes after conversion). Oldest audio clips are evicted first; late-arriving clips cannot evict newer ones to make space for themselves. A zero-byte budget retains transcripts only. Age expiration is also applied periodically and at archive access. SQLite transcripts survive audio eviction and are retained indefinitely by default. Optionally set `transcript_max_age_hours` to an age in hours; if both age limits are enabled, the transcript limit must exceed the audio limit. Expired transcript rows are deleted only after audio is gone and recognition is no longer pending. For example, set `max_age_hours = 168` and `transcript_max_age_hours = 2160` for seven-day audio and 90-day transcript age limits; the audio byte budget may evict clips sooner. At 32 kbit/s, AAC payloads use roughly one eighth of the space of 16 kHz mono PCM WAV before container overhead. Actual savings and coverage depend on clip lengths and encoder output. The worker encodes one file at a time outside the store lock, publishes the MP4 by atomic rename, updates the retained byte count, and removes the WAV only after successful publication. Failed encodes leave the WAV available for playback and retry. An in-progress MP4 temporary file uses additional disk space outside the retained payload budget. RAM mode does not survive restarts. This is a payload budget, not a hard limit on process RSS: inference models, queued float samples, temporary encoding buffers, in-flight HTTP responses, and SQLite caches need additional memory. Disk mode does not cap the SQLite database itself. The queue has a separate bounded clip count.
@@ -104,6 +106,10 @@ cargo test --all-features       # also compile the native recognition integratio
 ```
 
 The included tests cover WAV serialization, PLS parsing, sentence alignment and fallback, oldest-first eviction, age/byte limits, zero-budget handling, restart recovery, search and pagination, and HTTP byte-range responses. CI also exercises the demo API and compiles the native backend and frontend. These tests have been authored but **not run** in the creation environment: it has no Rust toolchain and no access to dependency download servers. No lockfile could be generated; generate and commit `Cargo.lock` and `web/package-lock.json` after the first successful build. Native recognition, live feed reception, frontend compilation and Docker build remain unverified. The previous attempt to access the four playlists timed out. The new implementation is not a claim that those feeds are currently online.
+
+## Railroad vocabulary
+
+The recognition configuration biases Parakeet toward `highball` and `C.P.` (control point) by default, including common casing, spacing and acronym variants. Edit `recognition.hotwords` in the TOML file to customize the list. The application prepares supported token sequences from the installed model vocabulary and enables modified beam search with a modest configurable score. No model retraining or extra download is required. This is a decoding preference, not a guarantee or a forced transcript replacement. Token segmentation is an approximation for older model archives without a BPE vocabulary, and modified beam search can be slower or less accurate than greedy decoding. Set `hotwords_score = 0` or `hotwords = []` to restore greedy search if quality degrades. Changes take effect after restart; previous transcripts are not rewritten. Sentence splitting preserves the dotted C.P. abbreviation.
 
 ## Silent recordings
 

@@ -2,6 +2,7 @@ mod api;
 mod audio;
 mod compression;
 mod config;
+mod hotwords;
 mod pipeline;
 mod playlists;
 mod sentences;
