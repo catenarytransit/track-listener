@@ -22,7 +22,7 @@ sudo apt-get install -y build-essential pkg-config cmake curl bzip2 ffmpeg libss
 cargo run --release -- --config config.toml
 ```
 
-Open http://127.0.0.1:8080. The first Cargo build obtains native Sherpa-ONNX libraries and dependencies; the separate shell script downloads the ASR and VAD models. After installation, inference does not require Internet access, although network radio feeds do. No GPU or CUDA needed. For custom native library locations, consult https://docs.rs/sherpa-onnx/2.0.3/sherpa_onnx/ (e.g. `SHERPA_ONNX_LIB_DIR`). The default static linking feature is used. The upstream model bundle is about 630 MiB on disk; inference uses additional RAM.
+Open http://127.0.0.1:4582. The first Cargo build obtains native Sherpa-ONNX libraries and dependencies; the separate shell script downloads the ASR and VAD models. After installation, inference does not require Internet access, although network radio feeds do. No GPU or CUDA needed. For custom native library locations, consult https://docs.rs/sherpa-onnx/2.0.3/sherpa_onnx/ (e.g. `SHERPA_ONNX_LIB_DIR`). The default static linking feature is used. The upstream model bundle is about 630 MiB on disk; inference uses additional RAM.
 
 ## Docker
 

@@ -2,7 +2,7 @@ services:
   track-listener:
     build: .
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:4582:4582"
     volumes:
       - ./data:/app/data
       - ./models:/app/models:ro

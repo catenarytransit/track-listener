@@ -1,6 +1,6 @@
 [server]
 host = "0.0.0.0"
-port = 8080
+port = 4582
 database = "data/track-listener.sqlite3"
 web_dist = "web/dist"
 
