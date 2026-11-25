@@ -26,7 +26,7 @@ fn seed_demo(cfg:&Config,store:&mut Store)->Result<()> {
     if store.stats()?.clips>0{return Ok(());}
     for (i,ch) in cfg.channels.iter().enumerate(){
         let samples:Vec<f32>=(0..audio::RATE*2).map(|t|(t as f32*440.0*std::f32::consts::TAU/audio::RATE as f32).sin()*0.08).collect();
-        let id=store.add_clip(ch,audio::now_ms()-i as i64*73_000,&samples)?;
+        let id=store.add_clip(ch,audio::now_ms()-i as i64*73_000,&samples)?.context("demo tone unexpectedly silent")?;
         store.finish(&id,&[sentences::Sentence{text:"Synthetic playback tone. No speech in this demo fixture.".into(),start_ms:Some(0),end_ms:Some(2000)}],"synthetic-demo",None)?;
     }
     Ok(())

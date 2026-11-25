@@ -1,4 +1,4 @@
-use crate::{audio::{duration_ms, now_ms, wav}, config::{Audio, Channel, Mode}, sentences::Sentence};
+use crate::{audio::{duration_ms, is_silent, now_ms, wav}, config::{Audio, Channel, Mode}, sentences::Sentence};
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use rusqlite::{Connection, OptionalExtension, params, named_params};
@@ -46,6 +46,9 @@ pub struct CompressionJob {
     pub id: String,
     pub source: PathBuf,
     pub temporary: PathBuf,
+    pub format: String,
+    pub silence_checked: bool,
+    pub duration_ms: i64,
 }
 #[derive(Debug)]
 struct Archived { id: String, mode: Option<String>, bytes: i64, started: i64 }
@@ -61,6 +64,7 @@ impl Store {
                 started_ms INTEGER NOT NULL, duration_ms INTEGER NOT NULL,
                 audio_bytes INTEGER NOT NULL DEFAULT 0, audio_mode TEXT,
                 audio_format TEXT NOT NULL DEFAULT 'wav',
+                silence_checked INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL, model TEXT, error TEXT
             );
             CREATE TABLE IF NOT EXISTS sentences (
@@ -72,17 +76,22 @@ impl Store {
             CREATE INDEX IF NOT EXISTS clips_channel_time ON clips(channel_id, started_ms DESC, id DESC);
             CREATE INDEX IF NOT EXISTS archive_time ON clips(started_ms, id) WHERE audio_bytes>0;")?;
         // Existing archives have no format column; their retained payloads are WAV.
-        let has_format = {
+        let columns = {
             let mut stmt = db.prepare("PRAGMA table_info(clips)")?;
             let names = stmt.query_map([], |r| r.get::<_, String>(1))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            names.iter().any(|name| name == "audio_format")
+            names
         };
-        if !has_format {
+        if !columns.iter().any(|name| name == "audio_format") {
             db.execute_batch("ALTER TABLE clips ADD COLUMN audio_format TEXT NOT NULL DEFAULT 'wav';")?;
         }
+        if !columns.iter().any(|name| name == "silence_checked") {
+            db.execute_batch("ALTER TABLE clips ADD COLUMN silence_checked INTEGER NOT NULL DEFAULT 0;")?;
+        }
         db.execute_batch("CREATE INDEX IF NOT EXISTS disk_wav_time ON clips(started_ms,id)
-            WHERE audio_mode='disk' AND audio_format='wav' AND audio_bytes>0;")?;
+            WHERE audio_mode='disk' AND audio_format='wav' AND audio_bytes>0;
+            CREATE INDEX IF NOT EXISTS disk_silence_time ON clips(started_ms,id)
+            WHERE audio_mode='disk' AND silence_checked=0 AND audio_bytes>0;")?;
         let mut s = Self { db, cfg, ram: HashMap::new() };
         s.reconcile()?;
         Ok(s)
@@ -164,16 +173,34 @@ impl Store {
         Ok(())
     }
     pub fn compression_jobs(&self) -> Result<Vec<CompressionJob>> {
-        let mut stmt = self.db.prepare("SELECT id FROM clips
-            WHERE audio_mode='disk' AND audio_format='wav' AND audio_bytes>0
+        let mut stmt = self.db.prepare("SELECT id,audio_format,silence_checked,duration_ms FROM clips
+            WHERE audio_mode='disk' AND audio_bytes>0
+            AND ((audio_format='wav' AND silence_checked=1)
+                 OR (silence_checked=0 AND status<>'pending'))
             ORDER BY started_ms,id")?;
-        let ids = stmt.query_map([], |r| r.get::<_, String>(0))?
+        let rows = stmt.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,bool>(2)?,r.get::<_,i64>(3)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        ids.into_iter().map(|id| Ok(CompressionJob {
-            source: self.path(&id, "wav")?,
+        rows.into_iter().map(|(id,format,silence_checked,duration_ms)| Ok(CompressionJob {
+            source: self.path(&id, if format=="mp4" {"mp4"} else {"wav"})?,
             temporary: self.path(&id, "encoding")?,
-            id,
+            id,format,silence_checked,duration_ms,
         })).collect()
+    }
+    pub fn mark_silence_checked(&self, id: &str) -> Result<()> {
+        self.db.execute("UPDATE clips SET silence_checked=1 WHERE id=?1", [id])?;
+        Ok(())
+    }
+    pub fn delete_silent_clip(&mut self, id: &str) -> Result<bool> {
+        // A successful whole-file scan is proof even if audio eviction won
+        // the race. Never remove a pending ASR job. Commit the row deletion
+        // first so startup orphan reconciliation can finish file cleanup
+        // after a crash, and foreign-key cascade removes hallucinated text.
+        let deleted = self.db.execute("DELETE FROM clips WHERE id=?1 AND silence_checked=0 AND status<>'pending'", [id])?;
+        if deleted==0 { return Ok(false); }
+        self.ram.remove(id);
+        Self::remove_if_exists(&self.path(id,"wav")?)?;
+        Self::remove_if_exists(&self.path(id,"mp4")?)?;
+        Ok(true)
     }
     // Called under the store lock only after the asynchronous encoder succeeds.
     // Eviction may have won the race; never recreate evicted audio.
@@ -197,9 +224,14 @@ impl Store {
         self.prune()?;
         Ok(true)
     }
-    pub fn add_clip(&mut self, ch: &Channel, started: i64, samples: &[f32]) -> Result<String> {
+    pub fn add_clip(&mut self, ch: &Channel, started: i64, samples: &[f32]) -> Result<Option<String>> {
+        // Reject silence before any database insert, file write or ASR queueing.
+        if samples.is_empty() || is_silent(samples) { return Ok(None); }
+        self.insert_clip(ch,started,samples,true).map(Some)
+    }
+    fn insert_clip(&mut self, ch: &Channel, started: i64, samples: &[f32], silence_checked: bool) -> Result<String> {
         let id = Uuid::new_v4().to_string();
-        self.db.execute("INSERT INTO clips(id,channel_id,channel_name,started_ms,duration_ms,status) VALUES(?1,?2,?3,?4,?5,'pending')", params![id,ch.id,ch.name,started,duration_ms(samples.len())])?;
+        self.db.execute("INSERT INTO clips(id,channel_id,channel_name,started_ms,duration_ms,status,silence_checked) VALUES(?1,?2,?3,?4,?5,'pending',?6)", params![id,ch.id,ch.name,started,duration_ms(samples.len()),silence_checked])?;
         let expected = samples.len() as u64 * 2 + 44;
         if expected > self.cfg.max_bytes() { return Ok(id); }
         // Reserve budget before allocating or writing a new retained payload. A late
@@ -291,9 +323,9 @@ impl Store {
     #[test] fn retention_preserves_text_and_evicts_oldest() {
         for mode in [Mode::Ram,Mode::Disk] {
             let d=tempfile::tempdir().unwrap(); let mut s=Store::open(&d.path().join("db"),config(d.path(),mode)).unwrap();
-            let samples=vec![0.0;RATE*20]; let first=s.add_clip(&channel(),1,&samples).unwrap();
+            let samples=vec![0.02;RATE*20]; let first=s.add_clip(&channel(),1,&samples).unwrap().unwrap();
             s.finish(&first,&[Sentence{text:"Copy 100%.".into(),start_ms:Some(0),end_ms:Some(1000)}],"test",None).unwrap();
-            let second=s.add_clip(&channel(),2,&samples).unwrap();
+            let second=s.add_clip(&channel(),2,&samples).unwrap().unwrap();
             assert!(s.get_audio(&first).unwrap().is_none()); assert!(s.get_audio(&second).unwrap().is_some());
             let stats=s.stats().unwrap(); assert!(stats.used_bytes <= stats.max_bytes as i64); assert_eq!(stats.sentences,1);
             let page=s.list(&Filters{q:Some("100%".into()),channel:Some("test".into()),..Default::default()}).unwrap(); assert_eq!(page.items.len(),1); assert_eq!(page.items[0].id,first);
@@ -301,14 +333,14 @@ impl Store {
     }
     #[test] fn restart_and_zero_budget() {
         let d=tempfile::tempdir().unwrap(); let db=d.path().join("db"); let mut cfg=config(d.path(),Mode::Disk);
-        let id={let mut s=Store::open(&db,cfg.clone()).unwrap();s.add_clip(&channel(),1,&[0.0;512]).unwrap()};
+        let id={let mut s=Store::open(&db,cfg.clone()).unwrap();s.add_clip(&channel(),1,&[0.02;512]).unwrap().unwrap()};
         let mut s=Store::open(&db,cfg.clone()).unwrap();assert!(s.get_audio(&id).unwrap().is_some()); assert_eq!(s.list(&Filters::default()).unwrap().items[0].status,"interrupted"); drop(s);
         cfg.max_mib=0; let mut s=Store::open(&db,cfg).unwrap(); assert!(s.get_audio(&id).unwrap().is_none()); assert_eq!(s.stats().unwrap().clips,1);
     }
     #[test] fn age_limit_and_late_clips() {
         let d=tempfile::tempdir().unwrap();let mut cfg=config(d.path(),Mode::Ram);cfg.max_age_hours=1;
-        let mut s=Store::open(&d.path().join("db"),cfg).unwrap(); let old=s.add_clip(&channel(),now_ms()-7_200_000,&[0.0;512]).unwrap();assert!(s.get_audio(&old).unwrap().is_none());
-        let samples=vec![0.0;RATE*20]; let new=s.add_clip(&channel(),now_ms(),&samples).unwrap();let late=s.add_clip(&channel(),now_ms()-10000,&samples).unwrap();assert!(s.get_audio(&late).unwrap().is_none());assert!(s.get_audio(&new).unwrap().is_some());
+        let mut s=Store::open(&d.path().join("db"),cfg).unwrap(); let old=s.add_clip(&channel(),now_ms()-7_200_000,&[0.02;512]).unwrap().unwrap();assert!(s.get_audio(&old).unwrap().is_none());
+        let samples=vec![0.02;RATE*20]; let new=s.add_clip(&channel(),now_ms(),&samples).unwrap().unwrap();let late=s.add_clip(&channel(),now_ms()-10000,&samples).unwrap().unwrap();assert!(s.get_audio(&late).unwrap().is_none());assert!(s.get_audio(&new).unwrap().is_some());
     }
     #[tokio::test]
     async fn compresses_existing_archive_and_recovers_after_restart() {
@@ -317,8 +349,8 @@ impl Store {
         let cfg=config(d.path(),Mode::Disk);
         let id={
             let mut s=Store::open(&db,cfg.clone()).unwrap();
-            let samples=vec![0.0; RATE*2];
-            let id=s.add_clip(&channel(),now_ms(),&samples).unwrap();
+            let samples:Vec<f32>=(0..RATE*2).map(|i|(i as f32*440.0*std::f32::consts::TAU/RATE as f32).sin()*0.08).collect();
+            let id=s.add_clip(&channel(),now_ms(),&samples).unwrap().unwrap();
             s.finish(&id,&[Sentence{text:"Radio test".into(),start_ms:Some(0),end_ms:Some(1000)}],"test",None).unwrap();
             id
         };
@@ -358,7 +390,7 @@ impl Store {
     fn encoding_cannot_resurrect_evicted_audio() {
         let d=tempfile::tempdir().unwrap();
         let mut s=Store::open(&d.path().join("db"),config(d.path(),Mode::Disk)).unwrap();
-        let id=s.add_clip(&channel(),now_ms(),&[0.0;512]).unwrap();
+        let id=s.add_clip(&channel(),now_ms(),&[0.02;512]).unwrap().unwrap();
         let job=s.compression_jobs().unwrap().pop().unwrap();
         fs::write(&job.temporary,b"encoded").unwrap();
         s.cfg.max_mib=0;
@@ -375,8 +407,8 @@ impl Store {
         cfg.transcript_max_age_hours=24;
         let mut s=Store::open(&d.path().join("db"),cfg).unwrap();
         let now=now_ms();
-        let recent=s.add_clip(&channel(),now-2*3_600_000,&[0.0;512]).unwrap();
-        let old=s.add_clip(&channel(),now-25*3_600_000,&[0.0;512]).unwrap();
+        let recent=s.add_clip(&channel(),now-2*3_600_000,&[0.02;512]).unwrap().unwrap();
+        let old=s.add_clip(&channel(),now-25*3_600_000,&[0.02;512]).unwrap().unwrap();
         let sentence=Sentence{text:"Copy".into(),start_ms:None,end_ms:None};
         assert!(s.get_audio(&recent).unwrap().is_none());
         // Old pending jobs must survive cleanup until their workers finish.
@@ -390,9 +422,61 @@ impl Store {
         assert!(!page.items[0].audio_available);
         assert_eq!(s.stats().unwrap().sentences,1);
     }
+    #[test]
+    fn new_silence_is_not_archived_even_with_zero_budget() {
+        for mode in [Mode::Ram,Mode::Disk] {
+            let d=tempfile::tempdir().unwrap();
+            let mut cfg=config(d.path(),mode);
+            cfg.max_mib=0;
+            let mut s=Store::open(&d.path().join("db"),cfg).unwrap();
+            assert!(s.add_clip(&channel(),now_ms(),&[0.0;512]).unwrap().is_none());
+            assert_eq!(s.stats().unwrap().clips,0);
+            assert!(s.add_clip(&channel(),now_ms(),&[0.001;512]).unwrap().is_some());
+            assert_eq!(s.stats().unwrap().clips,1);
+        }
+    }
+    #[tokio::test]
+    async fn old_silent_wav_and_mp4_are_deleted_with_hallucinated_transcripts() {
+        let d=tempfile::tempdir().unwrap();
+        let mut s=Store::open(&d.path().join("db"),config(d.path(),Mode::Disk)).unwrap();
+        let silence=vec![0.0;RATE*2];
+        let quiet:Vec<f32>=(0..RATE*2).map(|i|(i as f32*440.0*std::f32::consts::TAU/RATE as f32).sin()*0.002).collect();
+        let wav_id=s.insert_clip(&channel(),now_ms(),&silence,false).unwrap();
+        let mp4_id=s.insert_clip(&channel(),now_ms(),&silence,false).unwrap();
+        let audible=s.insert_clip(&channel(),now_ms(),&quiet,false).unwrap();
+        let corrupt=s.insert_clip(&channel(),now_ms(),&silence,false).unwrap();
+        let pending=s.insert_clip(&channel(),now_ms(),&silence,false).unwrap();
+        let missing=s.insert_clip(&channel(),now_ms(),&silence,false).unwrap();
+        for id in [&wav_id,&mp4_id,&audible,&corrupt,&missing] {
+            s.finish(id,&[Sentence{text:"Hallucination".into(),start_ms:None,end_ms:None}],"old",None).unwrap();
+        }
+        let job=s.compression_jobs().unwrap().into_iter().find(|j|j.id==mp4_id).unwrap();
+        crate::compression::encode(&job).await.unwrap();
+        assert!(s.complete_compression(&job).unwrap());
+        fs::write(s.path(&corrupt,"wav").unwrap(),b"not audio").unwrap();
+        // If the sound has already expired, preserve its transcript: no proof.
+        let row=s.archived().unwrap().into_iter().find(|r|r.id==missing).unwrap();
+        s.evict(&row).unwrap();
+        let shared=std::sync::Arc::new(std::sync::Mutex::new(s));
+        crate::compression::compress_pass(&shared).await.unwrap();
+        let mut s=shared.lock().unwrap();
+        for id in [&wav_id,&mp4_id] {
+            assert!(s.get_audio(id).unwrap().is_none());
+            assert!(!s.path(id,"wav").unwrap().exists());
+            assert!(!s.path(id,"mp4").unwrap().exists());
+        }
+        assert_eq!(s.get_audio(&audible).unwrap().unwrap().1,"audio/mp4");
+        assert!(s.get_audio(&corrupt).unwrap().is_some());
+        assert!(s.get_audio(&pending).unwrap().is_some());
+        let p=s.list(&Filters::default()).unwrap();
+        assert_eq!(p.items.len(),4);
+        assert!(p.items.iter().any(|c|c.id==missing && !c.audio_available));
+        assert_eq!(s.stats().unwrap().sentences,3);
+        assert!(!s.compression_jobs().unwrap().iter().any(|j|j.id==audible));
+    }
     #[test] fn cursor_orders_equal_timestamps() {
         let d=tempfile::tempdir().unwrap();let mut s=Store::open(&d.path().join("db"),config(d.path(),Mode::Ram)).unwrap();
-        for _ in 0..3 {s.add_clip(&channel(),10,&[0.0;512]).unwrap();}
+        for _ in 0..3 {s.add_clip(&channel(),10,&[0.02;512]).unwrap().unwrap();}
         let p=s.list(&Filters{limit:Some(1),..Default::default()}).unwrap();let c=p.next_cursor.unwrap();
         let rest=s.list(&Filters{before_ms:Some(c.before_ms),before_id:Some(c.before_id),..Default::default()}).unwrap();assert_eq!(rest.items.len(),2);assert!(rest.items.iter().all(|x|x.id != p.items[0].id));
     }

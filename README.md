@@ -105,6 +105,12 @@ cargo test --all-features       # also compile the native recognition integratio
 
 The included tests cover WAV serialization, PLS parsing, sentence alignment and fallback, oldest-first eviction, age/byte limits, zero-budget handling, restart recovery, search and pagination, and HTTP byte-range responses. CI also exercises the demo API and compiles the native backend and frontend. These tests have been authored but **not run** in the creation environment: it has no Rust toolchain and no access to dependency download servers. No lockfile could be generated; generate and commit `Cargo.lock` and `web/package-lock.json` after the first successful build. Native recognition, live feed reception, frontend compilation and Docker build remain unverified. The previous attempt to access the four playlists timed out. The new implementation is not a claim that those feeds are currently online.
 
+## Silent recordings
+
+All channels reject clips before storage and transcription if every PCM sample is within eight signed 16-bit counts of zero (approximately -72 dBFS peak). A quiet transmission containing any sample above that conservative floor is retained; an empty or hallucinated transcript is not used to decide silence.
+
+The asynchronous archive worker also checks previously stored WAV and AAC/MP4 recordings, including in `--no-capture` mode. If a complete, successful decode proves the clip is silent, its database row, sentence rows and audio file are removed. Non-silent historical clips are marked as checked in SQLite to avoid decoding them again. Missing, corrupt, truncated or already-evicted recordings cannot establish silence, so their transcripts are preserved. Back up your archive before upgrading if you want to retain even silent files.
+
 ## Operational limitations
 
 - Recognition jobs are in-memory. Queued jobs interrupted by a crash are marked `interrupted` at next startup; audio on disk can remain playable. There is no automated job retry or durable spool in this version.
