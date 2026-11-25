@@ -24,6 +24,8 @@ cargo run --release -- --config config.toml
 
 Open http://127.0.0.1:4582. The first Cargo build obtains native Sherpa-ONNX libraries and dependencies; the separate shell script downloads the ASR and VAD models. After installation, inference does not require Internet access, although network radio feeds do. No GPU or CUDA needed. For custom native library locations, consult https://docs.rs/sherpa-onnx/2.0.3/sherpa_onnx/ (e.g. `SHERPA_ONNX_LIB_DIR`). The default static linking feature is used. The upstream model bundle is about 630 MiB on disk; inference uses additional RAM.
 
+On Unix, the executable automatically sets its nice value to +19 before creating the Tokio runtime or starting any capture, recognition or compression workers. On Linux, this is the lowest normal CPU scheduling priority and is inherited by newly created threads and FFmpeg child processes. Track Listener can still use spare CPU capacity, but yields to higher-priority workloads under contention; it is not a hard CPU limit. No sudo or additional container capabilities are needed. If the operating system rejects the change, the service logs a warning and continues. Non-Unix builds leave scheduling priority unchanged. This applies to the executable, not the preceding Cargo build.
+
 ## Docker
 
 ```sh
