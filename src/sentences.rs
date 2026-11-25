@@ -22,6 +22,8 @@ fn parts(text: &str) -> Vec<&str> {
         if chars.peek().is_some_and(|(_, ch)| !ch.is_whitespace()) { continue; }
         let p = text[start..end].trim();
         let last = p.split_whitespace().last().unwrap_or("");
+        // C.P. (control point) is an abbreviation, not a sentence break.
+        if last.eq_ignore_ascii_case("C.P.") { continue; }
         if matches!(last, "Mr." | "Mrs." | "Ms." | "Dr." | "St." | "Jr." | "Sr." | "No." | "U.S.") || (last.len() == 2 && last.ends_with('.') && last.as_bytes()[0].is_ascii_uppercase()) { continue; }
         if !p.is_empty() { out.push(p); }
         start = end;
@@ -62,6 +64,16 @@ pub fn split(text: &str, tokens: &[String], times: &[f32], durations: &[f32], le
         let r = split("Copy. Thanks.", &tokens, &[0.1,0.3,0.8,1.1], &[], 1400);
         assert_eq!(r.len(),2); assert_eq!(r[0].start_ms,Some(100)); assert_eq!(r[0].end_ms,Some(800));
         assert_eq!(r[1].start_ms,Some(800));
+    }
+    #[test] fn control_point_abbreviation_keeps_sentence_and_timing() {
+        let tokens=["\u{2581}At","\u{2581}C",".","P",".","\u{2581}Ray","." ,"\u{2581}High","ball","!"].map(String::from);
+        let times=[0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9];
+        let r=split("At C.P. Ray. Highball!",&tokens,&times,&[],1100);
+        assert_eq!(r.len(),2);
+        assert_eq!(r[0].text,"At C.P. Ray.");
+        assert_eq!(r[0].start_ms,Some(0));
+        assert_eq!(r[1].text,"Highball!");
+        assert_eq!(r[1].start_ms,Some(700));
     }
     #[test] fn mismatched() { let r = split("No. 4 is clear. Copy!", &["bad".into()], &[0.1], &[], 1000); assert_eq!(r.len(),2); assert_eq!(r[0].start_ms,None); }
 }

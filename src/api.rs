@@ -29,10 +29,14 @@ fn range(value:&str,size:usize)->Option<(usize,usize)>{
     if a.is_empty(){let suffix=b.parse::<usize>().ok()?;if suffix==0{return None;}Some((size.saturating_sub(suffix),size-1))}
     else{let start=a.parse::<usize>().ok()?;let end=if b.is_empty(){size-1}else{b.parse::<usize>().ok()?.min(size-1)};if start>=size||end<start{None}else{Some((start,end))}}
 }
-fn audio_response(data:Bytes,headers:&HeaderMap,head:bool)->Response{
+fn audio_response(data:Bytes,mime:&str,id:&str,headers:&HeaderMap,head:bool)->Response{
     let len=data.len();
-    let mut response=Response::builder().header(header::ACCEPT_RANGES,"bytes").header(header::CACHE_CONTROL,"no-store").header(header::CONTENT_TYPE,"audio/wav");
-    let (status,start,end)=if let Some(raw)=headers.get(header::RANGE){
+    // Different validators for the temporary WAV and the final MP4 prevent
+    // a conditional range request from splicing different representations.
+    let etag=format!("\"{id}-{mime}\"");
+    let mut response=Response::builder().header(header::ACCEPT_RANGES,"bytes").header(header::CACHE_CONTROL,"no-store").header(header::CONTENT_TYPE,mime).header(header::ETAG,etag.as_str());
+    let requested_range=headers.get(header::RANGE).filter(|_|headers.get(header::IF_RANGE).is_none_or(|v|v.as_bytes()==etag.as_bytes()));
+    let (status,start,end)=if let Some(raw)=requested_range{
         if let Some((a,b))=raw.to_str().ok().and_then(|v|range(v,len)){(StatusCode::PARTIAL_CONTENT,a,b+1)}
         else{return response.status(StatusCode::RANGE_NOT_SATISFIABLE).header(header::CONTENT_RANGE,format!("bytes */{len}")).body(Body::empty()).unwrap();}
     }else{(StatusCode::OK,0,len)};
@@ -40,8 +44,9 @@ fn audio_response(data:Bytes,headers:&HeaderMap,head:bool)->Response{
     response.status(status).header(header::CONTENT_LENGTH,(end-start).to_string()).body(if head{Body::empty()}else{Body::from(data.slice(start..end))}).unwrap()
 }
 async fn audio(State(s):State<AppState>,Path(id):Path<String>,method:Method,headers:HeaderMap)->Result<Response,ApiError>{
-    let data=db(s.store,move|store|store.get_audio(&id)).await?.ok_or_else(||ApiError(StatusCode::NOT_FOUND,"Audio expired or unavailable; transcript may remain".into()))?;
-    Ok(audio_response(data,&headers,method==Method::HEAD))
+    let clip_id=id.clone();
+    let (data,mime)=db(s.store,move|store|store.get_audio(&id)).await?.ok_or_else(||ApiError(StatusCode::NOT_FOUND,"Audio expired or unavailable; transcript may remain".into()))?;
+    Ok(audio_response(data,mime,&clip_id,&headers,method==Method::HEAD))
 }
 async fn health(State(s):State<AppState>)->Json<Value>{Json(json!({"ok":true,"capture_enabled":s.capture_enabled}))}
 pub fn router(state:AppState,web:PathBuf)->Router{
@@ -52,5 +57,13 @@ pub fn router(state:AppState,web:PathBuf)->Router{
 #[cfg(test)] mod tests{
     use super::*;
     #[test]fn ranges(){assert_eq!(range("bytes=0-2",10),Some((0,2)));assert_eq!(range("bytes=-3",10),Some((7,9)));assert_eq!(range("bytes=8-",10),Some((8,9)));assert_eq!(range("bytes=8-99",10),Some((8,9)));assert_eq!(range("bytes=10-",10),None);assert_eq!(range("bytes=-0",10),None);assert_eq!(range("bytes=1-2,4-5",10),None);}
-    #[tokio::test]async fn partial_response(){let mut h=HeaderMap::new();h.insert(header::RANGE,"bytes=2-4".parse().unwrap());let r=audio_response(Bytes::from_static(b"0123456789"),&h,false);assert_eq!(r.status(),206);assert_eq!(r.headers()[header::CONTENT_RANGE],"bytes 2-4/10");assert_eq!(axum::body::to_bytes(r.into_body(),1024).await.unwrap(),Bytes::from_static(b"234"));}
+    #[test]fn changed_representation_ignores_old_if_range(){
+        let mut h=HeaderMap::new();
+        h.insert(header::RANGE,"bytes=2-4".parse().unwrap());
+        h.insert(header::IF_RANGE,"\"test-audio/wav\"".parse().unwrap());
+        let r=audio_response(Bytes::from_static(b"0123456789"),"audio/mp4","test",&h,true);
+        assert_eq!(r.status(),200);
+        assert_eq!(r.headers()[header::CONTENT_LENGTH],"10");
+    }
+    #[tokio::test]async fn partial_response(){let mut h=HeaderMap::new();h.insert(header::RANGE,"bytes=2-4".parse().unwrap());let r=audio_response(Bytes::from_static(b"0123456789"),"audio/mp4","test",&h,false);assert_eq!(r.status(),206);assert_eq!(r.headers()[header::CONTENT_TYPE],"audio/mp4");assert_eq!(r.headers()[header::CONTENT_RANGE],"bytes 2-4/10");assert_eq!(axum::body::to_bytes(r.into_body(),1024).await.unwrap(),Bytes::from_static(b"234"));}
 }

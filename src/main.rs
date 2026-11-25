@@ -1,6 +1,8 @@
 mod api;
 mod audio;
+mod compression;
 mod config;
+mod hotwords;
 mod pipeline;
 mod playlists;
 mod sentences;
@@ -25,7 +27,7 @@ fn seed_demo(cfg:&Config,store:&mut Store)->Result<()> {
     if store.stats()?.clips>0{return Ok(());}
     for (i,ch) in cfg.channels.iter().enumerate(){
         let samples:Vec<f32>=(0..audio::RATE*2).map(|t|(t as f32*440.0*std::f32::consts::TAU/audio::RATE as f32).sin()*0.08).collect();
-        let id=store.add_clip(ch,audio::now_ms()-i as i64*73_000,&samples)?;
+        let id=store.add_clip(ch,audio::now_ms()-i as i64*73_000,&samples)?.context("demo tone unexpectedly silent")?;
         store.finish(&id,&[sentences::Sentence{text:"Synthetic playback tone. No speech in this demo fixture.".into(),start_ms:Some(0),end_ms:Some(2000)}],"synthetic-demo",None)?;
     }
     Ok(())
@@ -55,10 +57,11 @@ async fn main()->Result<()> {
     let mut p=Pipeline::new(&cfg,args.demo,live);
     #[cfg(feature="native-asr")]
     if live{recognition::start_workers(&mut p,&cfg,store.clone())?;capture::start(&mut p,cfg.clone(),store.clone())?;}
+    let compression=tokio::spawn(compression::run(store.clone()));
     let archive=store.clone();
     let cleanup=tokio::spawn(async move{loop{tokio::time::sleep(Duration::from_secs(30)).await;let archive=archive.clone();let r=tokio::task::spawn_blocking(move||archive.lock().unwrap().prune()).await;if let Ok(Err(e))=r{tracing::error!(%e,"retention cleanup failed");}}});
     let app=api::router(api::AppState{store,channels:p.statuses.clone(),queue:p.queue.clone(),demo:args.demo,capture_enabled:live},cfg.server.web_dist.clone());
     tracing::info!(address=%listener.local_addr()?,live,"Track Listener started");
     let result=axum::serve(listener,app).with_graceful_shutdown(shutdown_signal()).await;
-    cleanup.abort();p.stop().await;result?;Ok(())
+    cleanup.abort();compression.abort();let _=compression.await;p.stop().await;result?;Ok(())
 }

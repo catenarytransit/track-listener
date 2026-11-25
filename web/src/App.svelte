@@ -1,5 +1,10 @@
 <script>
   import { onMount, tick } from 'svelte';
+  import { createThemeController } from './theme.js';
+  let theme = 'system', themeController;
+  function setTheme(value) {
+    themeController?.set(value);
+  }
   let channels = [], status = null, clips = [], cursor = null;
   let channel = '', query = '', since = '', until = '', live = true, zone = 'local';
   let error = '', loading = true, loadedOlder = false, requestId = 0, filterTimer;
@@ -40,9 +45,10 @@
   function choose(id) { channel=id; changed(); }
   function resume() { live=true; loadedOlder=false; load(); }
   onMount(()=>{
+    themeController = createThemeController(window, document, value => { theme = value; });
     refreshStatus();load();
     const timer=setInterval(()=>{refreshStatus();if(live&&!loadedOlder&&!loading)load(false,true);},3000);
-    return ()=>{clearInterval(timer);clearTimeout(filterTimer);};
+    return ()=>{themeController.destroy();clearInterval(timer);clearTimeout(filterTimer);};
   });
   async function play(clip, sentence=null) {
     if (!clip.audio_available) return;
@@ -81,13 +87,14 @@
       <div class="meter" role="progressbar" aria-label="Audio budget usage" aria-valuenow={usage} aria-valuemin="0" aria-valuemax="100"><div style:width={`${usage}%`}></div></div>
       <p>{status?.archive?.mode==='ram'?'RAM only':'Persistent disk'} · oldest first</p>
       <p>{status?.archive?.retained_clips??0} retained clips</p>
+      {#if status?.archive}<p>Transcripts: {status.archive.transcript_max_age_hours ? `${status.archive.transcript_max_age_hours} h age limit` : 'kept indefinitely'}</p>{/if}
       {#if status?.archive?.oldest_ms}<p>Oldest: {dateTime(status.archive.oldest_ms,zone)}</p>{/if}
       <p class="muted">Queue {status?.queue?.depth??0}/{status?.queue?.capacity??0}</p>
     </div>
     <footer>Self-hosted · CPU recognition<br/>Transcripts may contain errors.</footer>
   </aside>
   <main>
-    <header class="page-header"><div><div class="eyebrow">MONITOR / TRANSCRIPTS</div><h1>{channel ? channels.find(c=>c.id===channel)?.name||channel : 'Radio transmissions'}</h1><p>Browse speech detected on railway radio channels.</p></div><div class="live-controls"><button class:live-on={live&&!loadedOlder} class="live-button" on:click={()=>{if(live&&!loadedOlder)live=false;else resume();}}><span class="dot"></span>{live&&!loadedOlder?'Live updates':'Resume live'}</button><button on:click={()=>load()} class="secondary">Refresh</button></div></header>
+    <header class="page-header"><div><div class="eyebrow">MONITOR / TRANSCRIPTS</div><h1>{channel ? channels.find(c=>c.id===channel)?.name||channel : 'Radio transmissions'}</h1><p>Browse speech detected on railway radio channels.</p></div><div class="live-controls"><label class="theme-control">Appearance<select aria-label="Appearance" value={theme} on:change={e=>setTheme(e.currentTarget.value)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label><button class:live-on={live&&!loadedOlder} class="live-button" on:click={()=>{if(live&&!loadedOlder)live=false;else resume();}}><span class="dot"></span>{live&&!loadedOlder?'Live updates':'Resume live'}</button><button on:click={()=>load()} class="secondary">Refresh</button></div></header>
     {#if status?.demo}<div class="notice">Demo mode · synthetic recordings only. No live radio is connected.</div>{/if}
     <div class="stats"><div><span>Stored transmissions</span><strong>{status?.archive?.clips??'—'}</strong></div><div><span>Recognized sentences</span><strong>{status?.archive?.sentences??'—'}</strong></div><div><span>Receiving channels</span><strong>{online}<small> / {channels.length}</small></strong></div></div>
     <section class="filters" aria-label="Filter transcripts">

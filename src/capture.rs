@@ -18,7 +18,10 @@ impl Capture {
     async fn submit(&self, started:i64,samples:Vec<f32>) {
         let store=self.store.clone(); let ch=self.channel.clone(); let tx=self.tx.clone();
         let result=tokio::task::spawn_blocking(move || -> Result<bool> {
-            let id=store.lock().unwrap().add_clip(&ch,started,&samples)?;
+            let Some(id)=store.lock().unwrap().add_clip(&ch,started,&samples)? else {
+                tracing::debug!(channel=%ch.id,"discarded silent clip");
+                return Ok(true);
+            };
             if let Err(e)=tx.try_send(Job{id:id.clone(),samples}) {
                 let msg=if e.is_full(){"recognition queue full"}else{"recognition workers disconnected"};
                 store.lock().unwrap().finish(&id,&[],"not-transcribed",Some(msg))?;
