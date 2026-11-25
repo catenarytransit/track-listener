@@ -1,0 +1,80 @@
+use anyhow::{Context, Result, ensure};
+use serde::Deserialize;
+use std::{collections::HashSet, net::IpAddr, path::{Path, PathBuf}};
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    pub server: Server,
+    pub audio: Audio,
+    pub recognition: Recognition,
+    pub channels: Vec<Channel>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Server {
+    pub host: IpAddr,
+    pub port: u16,
+    pub database: PathBuf,
+    pub web_dist: PathBuf,
+}
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode { Ram, Disk }
+impl Mode { pub fn as_str(self) -> &'static str { match self { Self::Ram => "ram", Self::Disk => "disk" } } }
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Audio {
+    pub mode: Mode,
+    pub max_mib: u64,
+    pub path: PathBuf,
+    pub max_age_hours: u64,
+    pub queue_max_clips: usize,
+    pub max_clip_seconds: u32,
+}
+impl Audio { pub fn max_bytes(&self) -> u64 { self.max_mib * 1024 * 1024 } }
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Recognition {
+    pub model_dir: PathBuf,
+    pub vad_model: PathBuf,
+    pub threads: i32,
+    pub workers: usize,
+    pub vad_threshold: f32,
+    pub min_speech_seconds: f32,
+    pub min_silence_seconds: f32,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Channel {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    #[serde(default = "enabled")]
+    pub enabled: bool,
+}
+fn enabled() -> bool { true }
+impl Config {
+    pub fn load(path: &Path) -> Result<Self> {
+        let config: Self = toml::from_str(&std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?)?;
+        config.validate()?;
+        Ok(config)
+    }
+    pub fn validate(&self) -> Result<()> {
+        let a = &self.audio; let r = &self.recognition;
+        ensure!(a.max_mib <= (i64::MAX as u64 / 1048576), "audio budget overflow");
+        ensure!(a.max_age_hours <= 876000, "age limit out of range");
+        ensure!((1..=300).contains(&a.max_clip_seconds), "max_clip_seconds must be 1..300");
+        ensure!((1..=4096).contains(&a.queue_max_clips), "queue_max_clips must be 1..4096");
+        ensure!((1..=128).contains(&r.threads) && (1..=32).contains(&r.workers), "invalid recognition thread/worker count");
+        ensure!(r.vad_threshold > 0.0 && r.vad_threshold < 1.0, "invalid VAD threshold");
+        ensure!(r.min_speech_seconds > 0.0 && r.min_speech_seconds < a.max_clip_seconds as f32 && r.min_silence_seconds > 0.0 && r.min_silence_seconds <= 10.0, "invalid VAD durations");
+        let mut ids = HashSet::new();
+        for c in &self.channels {
+            ensure!(!c.id.is_empty() && c.id.len() <= 100 && !c.name.trim().is_empty() && ids.insert(&c.id), "empty or duplicate channel id/name: {}", c.id);
+            let u = reqwest::Url::parse(&c.url)?;
+            ensure!(matches!(u.scheme(), "http" | "https"), "only HTTP(S) feeds supported");
+        }
+        Ok(())
+    }
+}

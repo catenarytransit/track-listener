@@ -1,0 +1,44 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+database = "data/track-listener.sqlite3"
+web_dist = "web/dist"
+
+[audio]
+# Global retained WAV payload budget across every channel. RAM mode loses
+# audio on restart; disk mode persists it. Transcripts survive in both modes.
+mode = "disk" # "ram" or "disk"
+max_mib = 512
+path = "data/clips"
+max_age_hours = 0 # 0 = no age limit; oldest clips evicted first
+queue_max_clips = 64
+max_clip_seconds = 25
+
+[recognition]
+model_dir = "models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8"
+vad_model = "models/silero_vad.onnx"
+threads = 4
+workers = 1
+vad_threshold = 0.35
+min_speech_seconds = 0.20
+min_silence_seconds = 0.65
+
+[[channels]]
+id = "orange"
+name = "Orange County"
+url = "http://www.railroadradio.net/content/playlist/orange.pls"
+
+[[channels]]
+id = "metrolink-sfv"
+name = "Metrolink San Fernando Valley"
+url = "http://www.railroadradio.net/content/playlist/metrolinkSFV.pls"
+
+[[channels]]
+id = "santa-barbara"
+name = "Santa Barbara"
+url = "http://www.railroadradio.net/content/playlist/SBarbara.pls"
+
+[[channels]]
+id = "caltrain"
+name = "Caltrain"
+url = "http://www.railroadradio.net/content/playlist/caltrain.pls"

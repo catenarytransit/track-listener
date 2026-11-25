@@ -1,0 +1,6 @@
+/target/
+/models/
+/data/
+/web/node_modules/
+/web/dist/
+*.part

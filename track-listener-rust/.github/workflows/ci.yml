@@ -1,0 +1,52 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  rust-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --no-default-features
+      - run: cargo build --no-default-features
+      - name: Demo API smoke test
+        run: |
+          target/debug/track-listener --demo > demo.log 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8080/health && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8080/api/channels | jq -e 'length == 4 and all(.[]; .state == "demo")'
+          curl -fsS http://127.0.0.1:8080/api/status | jq -e '.demo and .archive.clips == 4'
+          ID=$(curl -fsS 'http://127.0.0.1:8080/api/clips?channel=caltrain' | jq -er '.items[0].id')
+          curl -fsS -D headers -H 'Range: bytes=0-43' "http://127.0.0.1:8080/api/clips/$ID/audio" -o header.wav
+          grep -qi '^HTTP/1.1 206' headers
+          test "$(wc -c < header.wav)" -eq 44
+          test "$(head -c 4 header.wav)" = RIFF
+  rust-native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config bzip2 libssl-dev ffmpeg
+      - run: cargo test --all-features
+      - run: cargo build --release
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
