@@ -39,10 +39,31 @@ async fn shutdown_signal(){
     }
     #[cfg(not(unix))] {let _=tokio::signal::ctrl_c().await;}
 }
-#[tokio::main]
-async fn main()->Result<()> {
+fn main()->Result<()> {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_|"track_listener=info,tower_http=info".into())).init();
-    let args=Args::parse();let mut cfg=Config::load(&args.config)?;
+    let args=Args::parse();
+    // On Linux niceness is per-thread. Apply it before creating the Tokio
+    // runtime, native inference threads or FFmpeg children so they inherit it.
+    #[cfg(unix)]
+    {
+        const NICE: libc::c_int = 19;
+        // SAFETY: PRIO_PROCESS with who=0 targets the calling thread/process.
+        // Lowering our own scheduling priority needs no elevated privileges.
+        if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, NICE) } == 0 {
+            tracing::info!(nice=NICE,"Low CPU priority enabled");
+        } else {
+            let error=std::io::Error::last_os_error();
+            tracing::warn!(%error,"Could not lower CPU priority; continuing");
+        }
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("create Tokio runtime")?
+        .block_on(run(args))
+}
+async fn run(args:Args)->Result<()> {
+    let mut cfg=Config::load(&args.config)?;
     if args.demo {
         // Never mix synthetic fixtures with production data. Use an isolated archive.
         cfg.server.database=PathBuf::from("data/demo.sqlite3");cfg.audio.path=PathBuf::from("data/demo-clips");

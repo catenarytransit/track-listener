@@ -23,6 +23,8 @@ jobs:
             curl -fsS http://127.0.0.1:4582/health && break
             sleep 1
           done
+          # Verify the main thread and every existing runtime thread inherited nice +19.
+          ps -L -p "$PID" -o ni= | awk '$1 != 19 { bad = 1 } END { exit (NR == 0 || bad) }'
           curl -fsS http://127.0.0.1:4582/api/channels | jq -e 'length == 4 and all(.[]; .state == "demo" and .region == "California")'
           curl -fsS http://127.0.0.1:4582/api/status | jq -e '.demo and .archive.clips == 4'
           ID=$(curl -fsS 'http://127.0.0.1:4582/api/clips?channel=caltrain' | jq -er '.items[0].id')
