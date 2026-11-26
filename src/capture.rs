@@ -1,4 +1,4 @@
-use crate::{audio::{RATE,duration_ms,now_ms}, config::{Config,Channel}, pipeline::{Job,Pipeline,SharedStore,Statuses}, playlists, recognition};
+use crate::{audio::{RATE,duration_ms,now_ms}, config::{Config,Channel}, pipeline::{Job,Pipeline,SharedStore,Statuses}, playlists, recognition, silence::NoiseFloor};
 use anyhow::{Context, Result, bail};
 use crossbeam_channel::Sender;
 use sherpa_onnx::VoiceActivityDetector;
@@ -37,7 +37,7 @@ impl Capture {
             }
         }
     }
-    async fn drain(&self,origin:i64) {
+    async fn drain(&self,origin:i64,noise:&NoiseFloor) {
         while let Some(s)=self.vad.front() {
             let start=s.start().max(0) as usize;
             let audio=s.samples().to_vec();
@@ -45,12 +45,18 @@ impl Capture {
             self.vad.pop();
             let cap=self.cfg.audio.max_clip_seconds as usize*RATE;
             for (i,chunk) in audio.chunks(cap).enumerate() {
-                if !chunk.is_empty() {self.submit(origin+duration_ms(start+i*cap),chunk.to_vec()).await;}
+                if let Some(bounds)=noise.speech_bounds(chunk) {
+                    let started=origin+duration_ms(start+i*cap+bounds.start);
+                    self.submit(started,chunk[bounds].to_vec()).await;
+                } else {
+                    tracing::debug!(channel=%self.channel.id,"discarded clip below stream activity floor");
+                }
             }
         }
     }
     async fn receive(&self,url:&reqwest::Url)->Result<()> {
         self.vad.reset();
+        let mut noise=NoiseFloor::default();
         let mut child=Command::new("ffmpeg")
             .args(["-nostdin","-hide_banner","-loglevel","error","-rw_timeout","15000000","-protocol_whitelist","http,https,tcp,tls,crypto","-i",url.as_str(),"-vn","-sn","-dn","-ac","1","-ar","16000","-c:a","pcm_s16le","-f","s16le","pipe:1"])
             .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit()).kill_on_drop(true).spawn().context("launch ffmpeg")?;
@@ -69,10 +75,12 @@ impl Capture {
             if last_status.elapsed()>=Duration::from_secs(1) {self.statuses.lock().unwrap()[self.index].last_audio_ms=Some(now_ms());last_status=Instant::now();}
             let mut samples=[0f32;512];
             for (s,pair) in samples.iter_mut().zip(frame.chunks_exact(2)) { *s=i16::from_le_bytes([pair[0],pair[1]]) as f32/32768.0; }
+            let was_detected=self.vad.detected();
             self.vad.accept_waveform(&samples);
-            self.drain(origin.unwrap()).await;
+            if !was_detected && !self.vad.detected() { noise.observe(&samples); }
+            self.drain(origin.unwrap(),&noise).await;
         };
-        if let Some(origin)=origin { self.vad.flush();self.drain(origin).await; }
+        if let Some(origin)=origin { self.vad.flush();self.drain(origin,&noise).await; }
         let _=child.kill().await; let _=child.wait().await;
         bail!("{reason}")
     }
