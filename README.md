@@ -116,13 +116,15 @@ The recognition configuration biases Parakeet toward `highball` and `C.P.` (cont
 
 ## Silent recordings
 
-All channels reject clips before storage and transcription if every PCM sample is within eight signed 16-bit counts of zero (approximately -72 dBFS peak). A quiet transmission containing any sample above that conservative floor is retained; an empty or hallucinated transcript is not used to decide silence.
+New live captures also use an adaptive, independent noise floor per channel, estimated from recent Silero-idle windows. A DC-insensitive RMS gate rejects near-silence, low-level stationary hiss and isolated spikes before writing or queueing clips. It requires roughly 96 ms of above-floor audio (or all windows of a shorter capped tail), trims quiet leading/trailing audio with 200 ms of context, and adjusts the capture start timestamp. Interior pauses and original undenoised PCM are preserved. The adaptive RMS threshold is bounded between about -66 and -42 dBFS; until enough idle history is collected it uses a conservative low-level fallback. Profiles reset on reconnect. The original all-samples-within-eight-PCM-counts guard still applies at storage. Weak speech near the noise floor can be missed; actual thresholds need validation against live recordings.
 
-The asynchronous archive worker also checks previously stored WAV and AAC/MP4 recordings, including in `--no-capture` mode. If a complete, successful decode proves the clip is silent, its database row, sentence rows and audio file are removed. Non-silent historical clips are marked as checked in SQLite to avoid decoding them again. Missing, corrupt, truncated or already-evicted recordings cannot establish silence, so their transcripts are preserved. Back up your archive before upgrading if you want to retain even silent files.
+For an archived clip longer than three seconds, an empty, punctuation-only or failed recognition triggers exactly one retry with `flexaudio-denoise` (offline RNNoise) on the existing ASR worker. A filtered 48 kHz mono buffer is denoised in memory, the library's delay is removed, and the result is converted back to the original 16 kHz sample count so transcript offsets still reference the original recording. No denoised file is written; a failed retry leaves the first result/error and original audio intact. Successfully recognized and shorter clips skip this extra processing.
+
+The asynchronous archive worker still uses the stricter eight-PCM-count peak rule when checking previously stored WAV and AAC/MP4 recordings, including in `--no-capture` mode. If a complete, successful decode proves the clip is silent, its database row, sentence rows and audio file are removed. Non-silent historical clips are marked as checked in SQLite to avoid decoding them again. Missing, corrupt, truncated or already-evicted recordings cannot establish silence, so their transcripts are preserved. Back up your archive before upgrading if you want to retain even silent files.
 
 ## Operational limitations
 
-- Recognition jobs are in-memory. Queued jobs interrupted by a crash are marked `interrupted` at next startup; audio on disk can remain playable. There is no automated job retry or durable spool in this version.
+- Recognition jobs are in-memory. Queued jobs interrupted by a crash are marked `interrupted` at next startup; audio on disk can remain playable. There is no durable job spool or restart retry in this version.
 - No authentication or TLS is included. Keep the server private, or deploy behind an authenticated reverse proxy. Do not publish raw dispatch radio clips without authorization. Only one process should own an archive.
 - Transcripts can contain errors and invented words. Do not use automated text for safety-critical railway operations. Verify against the original audio.
 - Unlimited transcript retention can grow the SQLite database; configure a transcript age limit if appropriate. Multi-process deployments and durable recognition retry queues are future work.
@@ -136,6 +138,9 @@ src/
   config.rs        TOML settings and validation
   capture.rs       FFmpeg, per-channel VAD, reconnect
   recognition.rs   CPU-only Parakeet, inference workers
+  silence.rs       adaptive per-channel clip activity and edge trimming
+  retry.rs         recognition fallback policy
+  denoise.rs       in-memory RNNoise and sample-rate conversion
   pipeline.rs      shared state and bounded job queue
   audio.rs         PCM/WAV and UTC time helpers
   compression.rs   asynchronous AAC/MP4 archive encoder

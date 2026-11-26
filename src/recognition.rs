@@ -1,4 +1,4 @@
-use crate::{audio::{RATE,duration_ms}, config::Config, pipeline::{Job,Pipeline,SharedStore}, sentences::split};
+use crate::{audio::{RATE,duration_ms}, config::Config, pipeline::{Pipeline,SharedStore}, sentences::split};
 use anyhow::{Context, Result, ensure};
 use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, VadModelConfig, VoiceActivityDetector};
 use std::{path::Path, thread};
@@ -40,12 +40,12 @@ pub fn vad(cfg:&Config)->Result<VoiceActivityDetector> {
     c.num_threads=1; c.provider=Some("cpu".into());
     VoiceActivityDetector::create(&c,cfg.audio.max_clip_seconds as f32+15.0).context("create Silero VAD")
 }
-fn decode(model:&OfflineRecognizer, job:&Job, hotwords:&str)->Result<Vec<crate::sentences::Sentence>> {
+fn decode(model:&OfflineRecognizer, samples:&[f32], hotwords:&str)->Result<Vec<crate::sentences::Sentence>> {
     let stream=if hotwords.is_empty() {model.create_stream()} else {model.create_stream_with_hotwords(hotwords)};
-    stream.accept_waveform(RATE as i32,&job.samples);
+    stream.accept_waveform(RATE as i32,samples);
     model.decode(&stream);
     let r=stream.get_result().context("no recognition result")?;
-    Ok(split(&r.text,&r.tokens,r.timestamps.as_deref().unwrap_or(&[]),r.durations.as_deref().unwrap_or(&[]),duration_ms(job.samples.len())))
+    Ok(split(&r.text,&r.tokens,r.timestamps.as_deref().unwrap_or(&[]),r.durations.as_deref().unwrap_or(&[]),duration_ms(samples.len())))
 }
 pub fn start_workers(p:&mut Pipeline,cfg:&Config,store:SharedStore)->Result<()> {
     // Encode once against the installed vocabulary; no Python or model download.
@@ -67,7 +67,14 @@ pub fn start_workers(p:&mut Pipeline,cfg:&Config,store:SharedStore)->Result<()> 
         let model_name=cfg.recognition.model_dir.file_name().and_then(|n|n.to_str()).unwrap_or("parakeet").to_string();
         p.workers.push(thread::Builder::new().name(format!("asr-{i}")).spawn(move || {
             while let Ok(job)=queue.recv() {
-                let result=decode(&model,&job,&hotwords);
+                let result=crate::retry::recognize_with_retry(
+                    &job.samples,
+                    |samples| decode(&model,samples,&hotwords),
+                    |samples| {
+                        tracing::debug!(clip=%job.id,"retrying recognition with denoised audio");
+                        crate::denoise::denoise(samples)
+                    },
+                );
                 let write=match result {
                     Ok(s)=>store.lock().unwrap().finish(&job.id,&s,&model_name,None),
                     Err(e)=>{tracing::warn!(clip=%job.id,%e,"recognition failed");store.lock().unwrap().finish(&job.id,&[],&model_name,Some(&e.to_string()))},
